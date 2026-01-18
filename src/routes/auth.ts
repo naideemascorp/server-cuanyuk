@@ -24,7 +24,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const whitelisted = await withTimeout(prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }), 1200);
       const allowed = Boolean(whitelisted);
 
-      if (!wantsHtml) return { allowed };
+      if (!wantsHtml) return { allowed, ip };
       if (!allowed) {
         return new Response("Not Found", {
           status: 404,
