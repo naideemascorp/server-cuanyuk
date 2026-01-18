@@ -523,6 +523,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
       return {
         ok: true,
+        token,
         user: { id: user.id, username: user.username, email: user.email, organizationId: user.organization_id, role: user.role }
       };
     },
