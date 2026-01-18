@@ -1,0 +1,226 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+  PENDING
+  DELETED
+}
+
+enum PaymentKind {
+  LINK
+  QRIS
+}
+
+enum UserRole {
+  USER
+  SUPER
+}
+
+model Organization {
+  id           String       @id @default(uuid())
+  created_date DateTime     @default(now())
+  updated_date DateTime     @updatedAt
+  status       RecordStatus @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  display_name String
+
+  users        User[]
+  categories   Category[]
+  merchants    Merchant[]
+  paymentItems PaymentItem[]
+  ipWhitelist  IPWhitelist[]
+
+  @@index([status, created_date])
+}
+
+model User {
+  id                String       @id @default(uuid())
+  created_date      DateTime     @default(now())
+  updated_date      DateTime     @updatedAt
+  status            RecordStatus @default(PENDING)
+  created_by        String?
+  updated_by        String?
+
+  organization_id   String
+  organization      Organization @relation(fields: [organization_id], references: [id], onDelete: Restrict)
+
+  username          String
+  email             String
+  password_hash     String
+  email_verified_at DateTime?
+  role              UserRole     @default(USER)
+
+  sessions          Session[]
+  emailTokens       EmailVerificationToken[]
+  passwordResetTokens PasswordResetToken[]
+  telegramUsers     TelegramUser[]
+
+  @@unique([organization_id, username])
+  @@unique([organization_id, email])
+  @@index([status, email_verified_at])
+}
+
+model Session {
+  id           String       @id @default(uuid())
+  created_date DateTime     @default(now())
+  updated_date DateTime     @updatedAt
+  status       RecordStatus @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  user_id      String
+  user         User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  jwt_id       String       @unique
+  expires_at   DateTime
+  revoked_at   DateTime?
+
+  @@index([user_id, status, expires_at])
+}
+
+model EmailVerificationToken {
+  id           String       @id @default(uuid())
+  created_date DateTime     @default(now())
+  updated_date DateTime     @updatedAt
+  status       RecordStatus @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  user_id      String
+  user         User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  token        String       @unique
+  expires_at   DateTime
+  consumed_at  DateTime?
+
+  @@index([user_id, status, expires_at])
+}
+
+model PasswordResetToken {
+  id           String       @id @default(uuid())
+  created_date DateTime     @default(now())
+  updated_date DateTime     @updatedAt
+  status       RecordStatus @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  user_id      String
+  user         User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  token        String       @unique
+  expires_at   DateTime
+  consumed_at  DateTime?
+
+  @@index([user_id, status, expires_at, created_date])
+}
+
+model IPWhitelist {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String?
+  organization    Organization? @relation(fields: [organization_id], references: [id], onDelete: SetNull)
+
+  ip              String       @unique
+  note            String?
+
+  @@index([status])
+}
+
+model Category {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  name            String
+
+  @@unique([organization_id, name])
+  @@index([organization_id, status, name])
+}
+
+model Merchant {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  name            String
+  category        String
+  picture_path    String?
+  sort_order      Int          @default(0)
+
+  paymentItems    PaymentItem[]
+
+  @@unique([organization_id, name])
+  @@index([organization_id, category, status])
+}
+
+model PaymentItem {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  merchant_id     String
+  merchant        Merchant     @relation(fields: [merchant_id], references: [id], onDelete: Cascade)
+
+  kind            PaymentKind
+
+  payment_url     String?
+  qris_path       String?
+  total_amount    Int          @default(0)
+
+  active_from     DateTime     @default(now())
+  expires_at      DateTime?
+  inactivated_at  DateTime?
+
+  @@index([merchant_id, status, expires_at])
+  @@index([organization_id, status, created_date])
+}
+
+model TelegramUser {
+  id           String       @id @default(uuid())
+  created_date DateTime     @default(now())
+  updated_date DateTime     @updatedAt
+  status       RecordStatus @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  user_id      String
+  user         User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  telegram_id  BigInt       @unique
+  last_login_at DateTime?
+
+  @@index([user_id, status])
+}
