@@ -201,7 +201,10 @@ const app = new Elysia()
       } catch {}
     }
   })
-  .listen(3001);
+  .listen({
+    port: Number(process.env.PORT ?? 3001),
+    hostname: "0.0.0.0"
+  });
 
 startExpirationSweep();
 void startTelegramBot();
@@ -226,4 +229,4 @@ void (async () => {
   } catch {}
 })();
 
-console.log(`Server on http://localhost:${app.server?.port}`);
+console.log(`Server on http://0.0.0.0:${app.server?.port}`);
