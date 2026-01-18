@@ -122,6 +122,9 @@ const computeExpiresAt = (expiration: string) => {
 };
 
 export const startTelegramBot = async () => {
+  const enabledRaw = (process.env.TELEGRAM_ENABLE ?? "true").trim().toLowerCase();
+  const enabled = !["0", "false", "no", "off", "disabled"].includes(enabledRaw);
+  if (!enabled) return;
   if (!config.telegramBotToken) return;
   const bot = new Bot(config.telegramBotToken);
 
@@ -237,7 +240,7 @@ export const startTelegramBot = async () => {
           await ctx.reply("No category yet. Run: add category");
           return;
         }
-        await ctx.reply(categories.map((c) => `• ${c.name}`).join("\n"));
+        await ctx.reply(categories.map((c: { name: string }) => `• ${c.name}`).join("\n"));
         return;
       }
       if (lower === "add merchant") {
@@ -520,7 +523,7 @@ export const startTelegramBot = async () => {
       await ctx.reply("No category yet. Run: add category");
       return;
     }
-    await ctx.reply(categories.map((c) => `• ${c.name}`).join("\n"));
+    await ctx.reply(categories.map((c: { name: string }) => `• ${c.name}`).join("\n"));
   });
 
   bot.callbackQuery("cmd:merchant-list", async (ctx) => {
@@ -688,5 +691,24 @@ export const startTelegramBot = async () => {
     await ctx.answerCallbackQuery();
   });
 
-  await bot.start();
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      await bot.start();
+      return;
+    } catch (err) {
+      const errorCode = (err as any)?.error_code ?? (err as any)?.error?.error_code;
+      if (errorCode === 409) {
+        const delayMs = Math.min(15_000, 1_500 + attempt * 750);
+        console.warn(`Telegram bot conflict (409). Retrying in ${delayMs}ms…`);
+        await sleep(delayMs);
+        continue;
+      }
+      console.error("Telegram bot crashed. Continuing without telegram bot.", err);
+      return;
+    }
+  }
+
+  console.warn("Telegram bot still conflicted after retries. Continuing without telegram bot.");
 };
