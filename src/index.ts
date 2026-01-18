@@ -16,8 +16,7 @@ import { categoryRoutes } from "./routes/categories";
 import { merchantRoutes } from "./routes/merchants";
 import { paymentRoutes } from "./routes/payments";
 import { startTelegramBot } from "./telegram/bot";
-
-type AuthUser = { userId: string; organizationId: string };
+import type { AuthUser } from "./lib/types";
 
 const app = new Elysia()
   .decorate("authUser", null as AuthUser | null)
@@ -46,10 +45,10 @@ const app = new Elysia()
     if (!token) return { authUser: null };
     const payload = await jwt.verify(token);
     if (!payload || typeof payload !== "object") return { authUser: null };
-
-    const sub = (payload as any).sub as string | undefined;
-    const org = (payload as any).org as string | undefined;
-    const jti = (payload as any).jti as string | undefined;
+    const p = payload as Record<string, unknown>;
+    const sub = typeof p.sub === "string" ? p.sub : undefined;
+    const org = typeof p.org === "string" ? p.org : undefined;
+    const jti = typeof p.jti === "string" ? p.jti : undefined;
     if (!sub || !org || !jti) return { authUser: null };
 
     const session = await prisma.session.findFirst({
@@ -65,24 +64,22 @@ const app = new Elysia()
   .get(
     "/public/dashboard/:token",
     async (ctx) => {
-      const params = (ctx as any).params as { token: string };
-      const set = (ctx as any).set as { status: number };
-      const verified = verifyShareToken(params.token);
+      const verified = verifyShareToken(ctx.params.token);
       if (!verified) {
-        set.status = 404;
+        ctx.set.status = 404;
         return { ok: false };
       }
 
-      const ip = getClientIpFromContext(ctx as any);
+      const ip = getClientIpFromContext(ctx);
       const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
       if (ipRow?.status === "INACTIVE") {
-        set.status = 404;
+        ctx.set.status = 404;
         return { ok: false };
       }
 
       const org = await prisma.organization.findFirst({ where: { id: verified.organizationId, status: "ACTIVE" } });
       if (!org) {
-        set.status = 404;
+        ctx.set.status = 404;
         return { ok: false };
       }
 
@@ -91,7 +88,7 @@ const app = new Elysia()
         select: { id: true }
       });
       if (!hasActiveUser) {
-        set.status = 404;
+        ctx.set.status = 404;
         return { ok: false };
       }
 
@@ -106,15 +103,33 @@ const app = new Elysia()
         include: { merchant: true }
       });
 
+      const merchantRows = merchants as Array<{
+        id: string;
+        name: string;
+        category: string;
+        picture_path: string | null;
+      }>;
+      const itemRows = items as Array<{
+        id: string;
+        kind: "LINK" | "QRIS";
+        status: string;
+        total_amount: number;
+        payment_url: string | null;
+        qris_path: string | null;
+        expires_at: Date | null;
+        created_date: Date;
+        merchant: { id: string; name: string; category: string };
+      }>;
+
       return {
         ok: true,
-        merchants: merchants.map((m: any) => ({
+        merchants: merchantRows.map((m) => ({
           id: m.id,
           name: m.name,
           category: m.category,
           pictureUrl: m.picture_path ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}` : null
         })),
-        items: items.map((i: any) => ({
+        items: itemRows.map((i) => ({
           id: i.id,
           kind: i.kind,
           status: i.status,

@@ -698,7 +698,16 @@ export const startTelegramBot = async () => {
       await bot.start();
       return;
     } catch (err) {
-      const errorCode = (err as any)?.error_code ?? (err as any)?.error?.error_code;
+      const errorCode = (() => {
+        if (!err || typeof err !== "object") return undefined;
+        const e = err as Record<string, unknown>;
+        if (typeof e.error_code === "number") return e.error_code;
+        const nested = e.error;
+        if (!nested || typeof nested !== "object") return undefined;
+        const n = nested as Record<string, unknown>;
+        if (typeof n.error_code === "number") return n.error_code;
+        return undefined;
+      })();
       if (errorCode === 409) {
         const delayMs = Math.min(15_000, 1_500 + attempt * 750);
         console.warn(`Telegram bot conflict (409). Retrying in ${delayMs}ms…`);

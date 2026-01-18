@@ -1,9 +1,10 @@
 import { Elysia, t } from "elysia";
 import { prisma } from "../lib/prisma";
+import type { AuthUser } from "../lib/types";
 
 export const categoryRoutes = new Elysia({ prefix: "/categories" })
   .get("/", async (ctx) => {
-    const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
+    const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const [cats, merchants] = await Promise.all([
       prisma.category.findMany({
         where: { organization_id: authUser.organizationId, status: "ACTIVE" },
@@ -29,9 +30,9 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
   .post(
     "/",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const body = (ctx as any).body as { name: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const body = ctx.body;
+      const set = ctx.set;
       const name = body.name.trim();
       const created = await prisma.category.upsert({
         where: { organization_id_name: { organization_id: authUser.organizationId, name } },
@@ -50,4 +51,3 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
     },
     { body: t.Object({ name: t.String({ minLength: 2, maxLength: 80 }) }) }
   );
-

@@ -80,11 +80,15 @@ export const getClientIp = (headers: Headers, fallback?: string | null) => {
   return best ?? normalized[0] ?? fallback ?? "0.0.0.0";
 };
 
-export const getClientIpFromContext = (ctx: { request: Request; server?: any }) => {
+type RequestIPServer = {
+  requestIP?: (req: Request) => { address?: string } | null | undefined;
+};
+
+export const getClientIpFromContext = (ctx: { request: Request; server?: unknown }) => {
   const headersIp = getClientIp(ctx.request.headers, null);
   if (headersIp && headersIp !== "0.0.0.0") return headersIp;
 
-  const server = ctx.server;
+  const server = ctx.server as RequestIPServer | undefined;
   if (server?.requestIP) {
     const ip = server.requestIP(ctx.request);
     if (ip?.address) return ip.address;

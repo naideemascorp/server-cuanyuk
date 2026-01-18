@@ -19,7 +19,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     const accept = ctx.request.headers.get("accept") ?? "";
     const wantsHtml = accept.includes("text/html");
 
-    const ip = getClientIpFromContext(ctx as any);
+    const ip = getClientIpFromContext(ctx);
     try {
       const whitelisted = await withTimeout(prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }), 1200);
       const allowed = Boolean(whitelisted);
@@ -194,15 +194,15 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/signup",
     async (ctx) => {
-      const body = (ctx as any).body as { username: string; email: string; password: string };
-      const set = (ctx as any).set as { status: number };
-      const ip = getClientIpFromContext(ctx as any);
+      const body = ctx.body;
+      const set = ctx.set;
+      const ip = getClientIpFromContext(ctx);
       let whitelisted: { organization_id: string | null } | null = null;
       try {
         whitelisted = await withTimeout(
           prisma.iPWhitelist.findFirst({
-          where: { ip, status: "ACTIVE" },
-          select: { organization_id: true }
+            where: { ip, status: "ACTIVE" },
+            select: { organization_id: true }
           }),
           1200
         );
@@ -317,19 +317,25 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/password-reset/request",
     async (ctx) => {
-      const body = (ctx as any).body as { email?: string };
-      const set = (ctx as any).set as { status: number };
-      const email = (body.email ?? "").trim().toLowerCase();
-      if (!email.includes("@")) {
+      const body = ctx.body;
+      const set = ctx.set;
+      const identifierRaw = (body.identifier ?? body.email ?? "").trim();
+      if (identifierRaw.length < 2) {
         set.status = 400;
         return { ok: false, code: "INVALID_INPUT" };
       }
 
+      const email = identifierRaw.includes("@") ? identifierRaw.toLowerCase() : "";
+      const username = identifierRaw;
+      const usernameLower = identifierRaw.toLowerCase();
+
       const user = await prisma.user.findFirst({
-        where: { email },
-        select: { id: true, email: true }
+        where: {
+          OR: [{ email }, { username }, { username: usernameLower }]
+        },
+        select: { id: true, email: true, status: true }
       });
-      if (!user) {
+      if (!user || user.status !== "ACTIVE") {
         set.status = 404;
         return { ok: false, code: "USER_NOT_FOUND" };
       }
@@ -337,7 +343,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const now = Date.now();
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
-      const sentToday = await (prisma as any).passwordResetToken.count({
+      const sentToday = await prisma.passwordResetToken.count({
         where: { user_id: user.id, created_date: { gte: startOfDay } }
       });
       if (sentToday >= 3) {
@@ -346,7 +352,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         return { ok: false, code: "RESEND_LIMIT", retryAt: retryAt.toISOString() };
       }
 
-      const last = await (prisma as any).passwordResetToken.findFirst({
+      const last = await prisma.passwordResetToken.findFirst({
         where: { user_id: user.id },
         orderBy: { created_date: "desc" },
         select: { created_date: true }
@@ -362,11 +368,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(now + oneDayMs);
       await prisma.$transaction([
-        (prisma as any).passwordResetToken.updateMany({
+        prisma.passwordResetToken.updateMany({
           where: { user_id: user.id, status: "ACTIVE" },
           data: { status: "INACTIVE", updated_by: "system" }
         }),
-        (prisma as any).passwordResetToken.create({
+        prisma.passwordResetToken.create({
           data: {
             user_id: user.id,
             token,
@@ -388,13 +394,13 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         remainingToday: Math.max(0, 3 - (sentToday + 1))
       };
     },
-    { body: t.Object({ email: t.Optional(t.String({ maxLength: 320 })) }) }
+    { body: t.Object({ email: t.Optional(t.String({ maxLength: 320 })), identifier: t.Optional(t.String({ maxLength: 320 })) }) }
   )
   .post(
     "/password-reset/confirm",
     async (ctx) => {
-      const body = (ctx as any).body as { token?: string; newPassword?: string };
-      const set = (ctx as any).set as { status: number };
+      const body = ctx.body;
+      const set = ctx.set;
       const token = (body.token ?? "").trim();
       const newPassword = (body.newPassword ?? "").trim();
       if (token.length < 10 || newPassword.length < 8) {
@@ -402,7 +408,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         return { ok: false, code: "INVALID_INPUT" };
       }
 
-      const row = await (prisma as any).passwordResetToken.findFirst({
+      const row = await prisma.passwordResetToken.findFirst({
         where: { token, status: "ACTIVE" },
         include: { user: true }
       });
@@ -411,7 +417,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         return { ok: false, code: "TOKEN_INVALID" };
       }
       if (row.expires_at.getTime() < Date.now()) {
-        await (prisma as any).passwordResetToken.update({
+        await prisma.passwordResetToken.update({
           where: { id: row.id },
           data: { status: "INACTIVE", updated_by: "system" }
         });
@@ -422,7 +428,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const passwordHash = await hashPassword(newPassword);
       const now = new Date();
       await prisma.$transaction([
-        (prisma as any).passwordResetToken.update({
+        prisma.passwordResetToken.update({
           where: { id: row.id },
           data: { consumed_at: now, status: "INACTIVE", updated_by: "system" }
         }),
@@ -448,10 +454,24 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/signin",
     async (ctx) => {
-      const body = (ctx as any).body as { identifier?: string; email?: string; password?: string };
-      const jwt = (ctx as any).jwt as { sign: (payload: unknown) => Promise<string> };
-      const cookie = (ctx as any).cookie as any;
-      const set = (ctx as any).set as { status: number };
+      type JwtSigner = { sign: (payload: { sub: string; org: string; jti: string }) => Promise<string> };
+      type CookieSession = {
+        session: {
+          set: (opts: {
+            value: string;
+            httpOnly: boolean;
+            sameSite: "lax" | "none";
+            secure: boolean;
+            path: string;
+            expires: Date;
+          }) => void;
+        };
+      };
+
+      const body = ctx.body;
+      const jwt = (ctx as unknown as { jwt: JwtSigner }).jwt;
+      const cookie = (ctx as unknown as { cookie: CookieSession }).cookie;
+      const set = ctx.set;
       const identifierRaw = (body?.identifier ?? body?.email ?? "").trim();
       const passwordRaw = (body?.password ?? "").trim();
       if (identifierRaw.length < 2 || passwordRaw.length === 0) {
@@ -462,9 +482,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const email = identifierRaw.toLowerCase();
       const username = identifierRaw;
       const usernameLower = identifierRaw.toLowerCase();
-      const user = (await prisma.user.findFirst({
+      const user = await prisma.user.findFirst({
         where: { OR: [{ email }, { username }, { username: usernameLower }] },
-        select: ({
+        select: {
           id: true,
           email_verified_at: true,
           status: true,
@@ -473,8 +493,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           username: true,
           email: true,
           role: true
-        } as any)
-      })) as any;
+        }
+      });
       if (!user) {
         set.status = 401;
         return { ok: false, code: "USER_NOT_FOUND" };

@@ -2,6 +2,7 @@ import { Elysia, t } from "elysia";
 import { config } from "../config";
 import { prisma } from "../lib/prisma";
 import { storeUpload } from "../lib/storage";
+import type { AuthUser } from "../lib/types";
 
 const decodeBase64 = (b64: string) => {
   const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -20,13 +21,14 @@ const sniffExt = (bytes: Uint8Array) => {
 
 export const merchantRoutes = new Elysia({ prefix: "/merchants" })
   .get("/", async (ctx) => {
-    const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
+    const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const merchants = await prisma.merchant.findMany({
       where: { organization_id: authUser.organizationId, status: "ACTIVE" },
       orderBy: [{ category: "asc" }, { sort_order: "asc" }, { name: "asc" }]
     });
+    const rows = merchants as Array<{ id: string; name: string; category: string; picture_path: string | null }>;
     return {
-      merchants: merchants.map((m: any) => ({
+      merchants: rows.map((m) => ({
         id: m.id,
         name: m.name,
         category: m.category,
@@ -37,9 +39,9 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
   .post(
     "/",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const body = (ctx as any).body as { name: string; category: string; imageBase64?: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const body = ctx.body;
+      const set = ctx.set;
       let picture_path: string | null = null;
       if (body.imageBase64 && body.imageBase64.trim() !== "") {
         const bytes = decodeBase64(body.imageBase64.trim());
@@ -79,9 +81,9 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
   .delete(
     "/:id",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const params = (ctx as any).params as { id: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const params = ctx.params;
+      const set = ctx.set;
       await prisma.merchant.updateMany({
         where: { id: params.id, organization_id: authUser.organizationId },
         data: { status: "DELETED", updated_by: authUser.userId }

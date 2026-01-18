@@ -3,6 +3,7 @@ import { config } from "../config";
 import { prisma } from "../lib/prisma";
 import { storeUpload } from "../lib/storage";
 import { wsRegistry } from "../lib/ws";
+import type { AuthUser } from "../lib/types";
 
 const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
   if (!value || value.trim() === "") {
@@ -21,14 +22,25 @@ const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
 
 export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .get("/all", async (ctx) => {
-    const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
+    const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const items = await prisma.paymentItem.findMany({
       where: { organization_id: authUser.organizationId, status: { in: ["ACTIVE", "INACTIVE"] } },
       orderBy: [{ created_date: "desc" }],
       include: { merchant: true }
     });
+    const rows = items as Array<{
+      id: string;
+      kind: "LINK" | "QRIS";
+      status: string;
+      total_amount: number;
+      payment_url: string | null;
+      qris_path: string | null;
+      expires_at: Date | null;
+      created_date: Date;
+      merchant: { id: string; name: string; category: string };
+    }>;
     return {
-      items: items.map((i: any) => ({
+      items: rows.map((i) => ({
         id: i.id,
         kind: i.kind,
         status: i.status,
@@ -42,14 +54,25 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
     };
   })
   .get("/active", async (ctx) => {
-    const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
+    const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const items = await prisma.paymentItem.findMany({
       where: { organization_id: authUser.organizationId, status: "ACTIVE" },
       orderBy: [{ created_date: "desc" }],
       include: { merchant: true }
     });
+    const rows = items as Array<{
+      id: string;
+      kind: "LINK" | "QRIS";
+      status: string;
+      total_amount: number;
+      payment_url: string | null;
+      qris_path: string | null;
+      expires_at: Date | null;
+      created_date: Date;
+      merchant: { id: string; name: string; category: string };
+    }>;
     return {
-      items: items.map((i: any) => ({
+      items: rows.map((i) => ({
         id: i.id,
         kind: i.kind,
         status: i.status,
@@ -65,9 +88,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .post(
     "/link",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const body = (ctx as any).body as { merchantId: string; paymentUrl: string; totalAmount: number; expiration?: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const body = ctx.body;
+      const set = ctx.set;
       const expiresAt = parseExpiry(body.expiration ?? null, 12 * 60);
       const item = await prisma.paymentItem.create({
         data: {
@@ -97,9 +120,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .post(
     "/qris",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const body = (ctx as any).body as { merchantId: string; imageBase64: string; totalAmount: number; expiration?: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const body = ctx.body;
+      const set = ctx.set;
       const expiresAt = parseExpiry(body.expiration ?? null, 12 * 60);
       const b64 = body.imageBase64;
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
@@ -133,9 +156,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .post(
     "/deactivate/:id",
     async (ctx) => {
-      const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-      const params = (ctx as any).params as { id: string };
-      const set = (ctx as any).set as { status: number };
+      const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+      const params = ctx.params;
+      const set = ctx.set;
       await prisma.paymentItem.updateMany({
         where: { id: params.id, organization_id: authUser.organizationId },
         data: { status: "INACTIVE", inactivated_at: new Date(), updated_by: authUser.userId }

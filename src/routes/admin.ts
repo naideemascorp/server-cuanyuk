@@ -1,12 +1,13 @@
 import { Elysia, t } from "elysia";
 import { prisma } from "../lib/prisma";
+import type { AuthUser } from "../lib/types";
 
 export const adminRoutes = new Elysia({ prefix: "/admin" })
   .guard(
     {
       beforeHandle: async (ctx) => {
-        const authUser = (ctx as any).authUser as { userId: string; organizationId: string } | null;
-        const set = (ctx as any).set as { status: number };
+        const authUser = (ctx as unknown as { authUser: AuthUser | null }).authUser;
+        const set = ctx.set;
         const u = authUser;
         if (!u) {
           set.status = 401;
@@ -14,9 +15,9 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
         }
         const user = await prisma.user.findFirst({
           where: { id: u.userId, organization_id: u.organizationId, status: "ACTIVE" },
-          select: ({ role: true } as any)
+          select: { role: true }
         });
-        if (!user || (user as any).role !== "SUPER") {
+        if (!user || user.role !== "SUPER") {
           set.status = 403;
           return { ok: false, code: "FORBIDDEN" };
         }
@@ -29,8 +30,16 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
             orderBy: [{ updated_date: "desc" }],
             take: 200
           });
+          const rows = entries as Array<{
+            id: string;
+            ip: string;
+            note: string | null;
+            status: string;
+            created_date: Date;
+            updated_date: Date;
+          }>;
           return {
-            entries: entries.map((e: any) => ({
+            entries: rows.map((e) => ({
               id: e.id,
               ip: e.ip,
               note: e.note,
@@ -43,9 +52,9 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
         .post(
           "/ips",
           async (ctx) => {
-            const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-            const body = (ctx as any).body as { ip: string; status: "ACTIVE" | "INACTIVE"; note?: string };
-            const set = (ctx as any).set as { status: number };
+            const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+            const body = ctx.body;
+            const set = ctx.set;
             const ip = body.ip.trim();
             const note = body.note?.trim() || null;
             const status = body.status;
@@ -73,12 +82,12 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
           }
         )
         .get("/users", async (ctx) => {
-          const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
+          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
           const users = await prisma.user.findMany({
             where: { organization_id: authUser.organizationId },
             orderBy: [{ updated_date: "desc" }],
             take: 200,
-            select: ({
+            select: {
               id: true,
               username: true,
               email: true,
@@ -86,10 +95,19 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
               status: true,
               created_date: true,
               updated_date: true
-            } as any)
+            }
           });
+          const rows = users as Array<{
+            id: string;
+            username: string;
+            email: string;
+            role: "USER" | "SUPER";
+            status: string;
+            created_date: Date;
+            updated_date: Date;
+          }>;
           return {
-            users: users.map((u: any) => ({
+            users: rows.map((u) => ({
               id: u.id,
               username: u.username,
               email: u.email,
@@ -103,10 +121,10 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
         .post(
           "/users/:id",
           async (ctx) => {
-            const authUser = (ctx as any).authUser as { userId: string; organizationId: string };
-            const set = (ctx as any).set as { status: number };
-            const params = (ctx as any).params as { id: string };
-            const body = (ctx as any).body as { username: string; email: string; role: "USER" | "SUPER"; status: "ACTIVE" | "INACTIVE" };
+            const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+            const set = ctx.set;
+            const params = ctx.params;
+            const body = ctx.body;
 
             const id = params.id;
             const username = body.username.trim();
@@ -125,7 +143,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
 
             const updated = await prisma.user.update({
               where: { id },
-              data: ({ username, email, role, status, updated_by: authUser.userId } as any)
+              data: { username, email, role, status, updated_by: authUser.userId }
             });
 
             if (status === "INACTIVE") {
