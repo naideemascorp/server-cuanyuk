@@ -515,7 +515,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       cookie.session.set({
         value: token,
         httpOnly: true,
-        sameSite: "lax",
+        sameSite: config.cookie.sameSite,
+        secure: config.cookie.secure,
         path: "/",
         expires: expiresAt
       });

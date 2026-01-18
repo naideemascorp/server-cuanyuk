@@ -23,7 +23,7 @@ const app = new Elysia()
   .decorate("authUser", null as AuthUser | null)
   .use(
     cors({
-      origin: [config.appPublicBaseUrl],
+      origin: config.corsOrigins,
       credentials: true,
       allowedHeaders: ["content-type", "authorization"]
     })
