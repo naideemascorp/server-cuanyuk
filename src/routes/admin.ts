@@ -25,6 +25,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
     },
     (app) =>
       app
+        .get("/access", async () => ({ ok: true }))
         .get("/ips", async () => {
           const entries = await prisma.iPWhitelist.findMany({
             orderBy: [{ updated_date: "desc" }],
@@ -82,11 +83,9 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
           }
         )
         .get("/users", async (ctx) => {
-          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
           const users = await prisma.user.findMany({
-            where: { organization_id: authUser.organizationId },
             orderBy: [{ updated_date: "desc" }],
-            take: 200,
+            take: 500,
             select: {
               id: true,
               username: true,
@@ -133,7 +132,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" })
             const status = body.status;
 
             const existing = await prisma.user.findFirst({
-              where: { id, organization_id: authUser.organizationId },
+              where: { id },
               select: { id: true, status: true }
             });
             if (!existing) {

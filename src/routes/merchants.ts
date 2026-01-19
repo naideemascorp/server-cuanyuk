@@ -1,7 +1,6 @@
 import { Elysia, t } from "elysia";
 import { config } from "../config";
 import { prisma } from "../lib/prisma";
-import { storeUpload } from "../lib/storage";
 import type { AuthUser } from "../lib/types";
 
 const decodeBase64 = (b64: string) => {
@@ -19,20 +18,37 @@ const sniffExt = (bytes: Uint8Array) => {
   return "png";
 };
 
+const extToMime = (ext: string) => {
+  if (ext === "jpg") return "image/jpeg";
+  if (ext === "gif") return "image/gif";
+  return "image/png";
+};
+
 export const merchantRoutes = new Elysia({ prefix: "/merchants" })
   .get("/", async (ctx) => {
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const merchants = await prisma.merchant.findMany({
       where: { organization_id: authUser.organizationId, status: "ACTIVE" },
-      orderBy: [{ category: "asc" }, { sort_order: "asc" }, { name: "asc" }]
+      orderBy: [{ category: "asc" }, { sort_order: "asc" }, { name: "asc" }],
+      select: { id: true, name: true, category: true, picture_path: true, picture_mime: true }
     });
-    const rows = merchants as Array<{ id: string; name: string; category: string; picture_path: string | null }>;
+    const rows = merchants as Array<{
+      id: string;
+      name: string;
+      category: string;
+      picture_path: string | null;
+      picture_mime: string | null;
+    }>;
     return {
       merchants: rows.map((m) => ({
         id: m.id,
         name: m.name,
         category: m.category,
-        pictureUrl: m.picture_path ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}` : null
+        pictureUrl: m.picture_mime
+          ? `${config.serverPublicBaseUrl}/assets/merchant/${m.id}`
+          : m.picture_path
+            ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}`
+            : null
       }))
     };
   })
@@ -43,12 +59,16 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
       const body = ctx.body;
       const set = ctx.set;
       let picture_path: string | null = null;
+      let picture_mime: string | null = null;
+      let picture_data: Uint8Array<ArrayBuffer> | null = null;
       if (body.imageBase64 && body.imageBase64.trim() !== "") {
         const bytes = decodeBase64(body.imageBase64.trim());
         if (bytes.length > 3_000_000) throw new Error("IMAGE_TOO_LARGE");
         const ext = sniffExt(bytes);
-        const stored = await storeUpload(bytes, ext);
-        picture_path = stored.filename;
+        picture_mime = extToMime(ext);
+        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        picture_data = new Uint8Array(ab);
+        picture_path = null;
       }
       const merchant = await prisma.merchant.create({
         data: {
@@ -56,6 +76,8 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
           name: body.name.trim(),
           category: body.category.trim() || "General",
           picture_path,
+          picture_mime,
+          picture_data,
           created_by: authUser.userId,
           updated_by: authUser.userId
         }
@@ -66,7 +88,11 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
           id: merchant.id,
           name: merchant.name,
           category: merchant.category,
-          pictureUrl: merchant.picture_path ? `${config.serverPublicBaseUrl}/uploads/${merchant.picture_path}` : null
+          pictureUrl: merchant.picture_mime
+            ? `${config.serverPublicBaseUrl}/assets/merchant/${merchant.id}`
+            : merchant.picture_path
+              ? `${config.serverPublicBaseUrl}/uploads/${merchant.picture_path}`
+              : null
         }
       };
     },

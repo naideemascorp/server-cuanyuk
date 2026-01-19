@@ -172,6 +172,8 @@ model Merchant {
   name            String
   category        String
   picture_path    String?
+  picture_mime    String?
+  picture_data    Bytes?
   sort_order      Int          @default(0)
 
   paymentItems    PaymentItem[]
@@ -198,6 +200,8 @@ model PaymentItem {
 
   payment_url     String?
   qris_path       String?
+  qris_mime       String?
+  qris_data       Bytes?
   total_amount    Int          @default(0)
 
   active_from     DateTime     @default(now())

@@ -94,13 +94,25 @@ const app = new Elysia()
 
       const merchants = await prisma.merchant.findMany({
         where: { organization_id: verified.organizationId, status: "ACTIVE" },
-        orderBy: [{ category: "asc" }, { name: "asc" }]
+        orderBy: [{ category: "asc" }, { name: "asc" }],
+        select: { id: true, name: true, category: true, picture_path: true, picture_mime: true }
       });
 
       const items = await prisma.paymentItem.findMany({
         where: { organization_id: verified.organizationId, status: "ACTIVE" },
         orderBy: [{ created_date: "desc" }],
-        include: { merchant: true }
+        select: {
+          id: true,
+          kind: true,
+          status: true,
+          total_amount: true,
+          payment_url: true,
+          qris_path: true,
+          qris_mime: true,
+          expires_at: true,
+          created_date: true,
+          merchant: { select: { id: true, name: true, category: true } }
+        }
       });
 
       const merchantRows = merchants as Array<{
@@ -108,6 +120,7 @@ const app = new Elysia()
         name: string;
         category: string;
         picture_path: string | null;
+        picture_mime: string | null;
       }>;
       const itemRows = items as Array<{
         id: string;
@@ -116,6 +129,7 @@ const app = new Elysia()
         total_amount: number;
         payment_url: string | null;
         qris_path: string | null;
+        qris_mime: string | null;
         expires_at: Date | null;
         created_date: Date;
         merchant: { id: string; name: string; category: string };
@@ -127,7 +141,11 @@ const app = new Elysia()
           id: m.id,
           name: m.name,
           category: m.category,
-          pictureUrl: m.picture_path ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}` : null
+          pictureUrl: m.picture_mime
+            ? `${config.serverPublicBaseUrl}/assets/merchant/${m.id}`
+            : m.picture_path
+              ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}`
+              : null
         })),
         items: itemRows.map((i) => ({
           id: i.id,
@@ -135,7 +153,11 @@ const app = new Elysia()
           status: i.status,
           totalAmount: i.total_amount,
           paymentUrl: i.payment_url,
-          qrisUrl: i.qris_path ? `${config.serverPublicBaseUrl}/uploads/${i.qris_path}` : null,
+          qrisUrl: i.qris_mime
+            ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}`
+            : i.qris_path
+              ? `${config.serverPublicBaseUrl}/uploads/${i.qris_path}`
+              : null,
           expiresAt: i.expires_at,
           createdDate: i.created_date,
           merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category }
@@ -176,6 +198,58 @@ const app = new Elysia()
   )
   .use(authRoutes)
   .get("/health", () => ({ ok: true }))
+  .get(
+    "/assets/merchant/:id",
+    async ({ params, set }) => {
+      const row = await prisma.merchant.findFirst({
+        where: { id: params.id, status: "ACTIVE" },
+        select: { picture_data: true, picture_mime: true, picture_path: true }
+      });
+      if (!row || !row.picture_data) {
+        set.status = 404;
+        return "not found";
+      }
+      set.headers["content-type"] = row.picture_mime ?? "image/png";
+      set.headers["cache-control"] = "public, max-age=3600";
+      const bytes = row.picture_data as unknown as Uint8Array;
+      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      return new Response(ab);
+    },
+    { params: t.Object({ id: t.String({ minLength: 10 }) }) }
+  )
+  .get(
+    "/assets/qris/:id",
+    async ({ params, set }) => {
+      const row = await prisma.paymentItem.findFirst({
+        where: { id: params.id, status: "ACTIVE", kind: "QRIS" },
+        select: { qris_data: true, qris_mime: true, qris_path: true }
+      });
+      if (!row) {
+        set.status = 404;
+        return "not found";
+      }
+      if (row.qris_data) {
+        set.headers["content-type"] = row.qris_mime ?? "image/png";
+        set.headers["cache-control"] = "public, max-age=3600";
+        const bytes = row.qris_data as unknown as Uint8Array;
+        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+        return new Response(ab);
+      }
+      if (row.qris_path) {
+        const path = resolveUploadPath(row.qris_path);
+        const file = Bun.file(path);
+        if (!(await file.exists())) {
+          set.status = 404;
+          return "not found";
+        }
+        set.headers["cache-control"] = "public, max-age=3600";
+        return file;
+      }
+      set.status = 404;
+      return "not found";
+    },
+    { params: t.Object({ id: t.String({ minLength: 10 }) }) }
+  )
   .get(
     "/uploads/:filename",
     async ({ params, set }) => {
