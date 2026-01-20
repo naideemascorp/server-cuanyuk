@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "bun x prisma generate && bun --watch src/index.ts",
-    "start": "bun x prisma generate && bun src/index.ts",
+    "dev": "bun prisma:deploy && bun prisma:generate && bun --watch src/index.ts",
+    "start": "bun prisma:deploy && bun prisma:generate && bun src/index.ts",
     "prisma:generate": "bun x prisma generate",
     "prisma:migrate": "bun x prisma migrate dev --name init --skip-seed",
     "prisma:deploy": "bun x prisma migrate deploy",

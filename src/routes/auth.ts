@@ -1,7 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { config } from "@/config";
 import { hashPassword, verifyPassword } from "@/lib/auth";
-import { getDeviceIdFromContext } from "@/lib/device";
 import { getClientIpFromContext } from "@/lib/ip";
 import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
 import { prisma } from "@/lib/prisma";
@@ -22,38 +21,13 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
     const ip = getClientIpFromContext(ctx);
     try {
-      const deviceId = getDeviceIdFromContext(ctx);
-      const activeDeviceCount = (await withTimeout(
-        prisma.deviceWhitelist.count({ where: { status: "ACTIVE" } }),
+      const whitelisted = await withTimeout(
+        prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }),
         1200,
-      )) as number;
-      const enforceDevice = activeDeviceCount > 0;
+      );
+      const allowed = Boolean(whitelisted);
 
-      const deviceAllowed = enforceDevice
-        ? deviceId
-          ? Boolean(
-              await withTimeout(
-                prisma.deviceWhitelist.findFirst({
-                  where: { device_id: deviceId, status: "ACTIVE" },
-                }),
-                1200,
-              ),
-            )
-          : false
-        : false;
-
-      const ipAllowed = enforceDevice
-        ? false
-        : Boolean(
-            await withTimeout(
-              prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }),
-              1200,
-            ),
-          );
-
-      const allowed = enforceDevice ? deviceAllowed : ipAllowed;
-
-      if (!wantsHtml) return { allowed, ip, deviceId };
+      if (!wantsHtml) return { allowed, ip };
       if (!allowed) {
         return new Response("Not Found", {
           status: 404,
@@ -101,9 +75,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         <div class="inner">
           <div>
             <h1>Sign Up</h1>
-            <div class="sub">This is the backend sign-up page. Device allow-list is enforced.</div>
+            <div class="sub">This is the backend sign-up page. IP allow-list is enforced.</div>
           </div>
-          <div class="pill">Device ID: <span id="device">${deviceId ?? "(missing)"}</span> • Signup allowed: <span id="allowed">${allowed ? "YES" : "NO"}</span></div>
+          <div class="pill">Client IP detected: <span id="ip">${ip}</span> • Signup allowed: <span id="allowed">${allowed ? "YES" : "NO"}</span></div>
           <div class="grid">
             <div class="card" style="grid-column: span 7;">
               <div class="cardInner">
@@ -226,42 +200,23 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const body = ctx.body;
       const set = ctx.set;
       const ip = getClientIpFromContext(ctx);
-      const deviceId = getDeviceIdFromContext(ctx);
-      const enforceDevice =
-        ((await withTimeout(
-          prisma.deviceWhitelist.count({ where: { status: "ACTIVE" } }),
-          1200,
-        )) as number) > 0;
 
       let whitelisted: { organization_id: string | null } | null = null;
       try {
-        whitelisted = enforceDevice
-          ? deviceId
-            ? await withTimeout(
-                prisma.deviceWhitelist.findFirst({
-                  where: { device_id: deviceId, status: "ACTIVE" },
-                  select: { organization_id: true },
-                }),
-                1200,
-              )
-            : null
-          : await withTimeout(
-              prisma.iPWhitelist.findFirst({
-                where: { ip, status: "ACTIVE" },
-                select: { organization_id: true },
-              }),
-              1200,
-            );
+        whitelisted = await withTimeout(
+          prisma.iPWhitelist.findFirst({
+            where: { ip, status: "ACTIVE" },
+            select: { organization_id: true },
+          }),
+          1200,
+        );
       } catch {
         set.status = 503;
         return { ok: false, code: "DB_NOT_READY" };
       }
       if (!whitelisted) {
         set.status = 403;
-        return {
-          ok: false,
-          code: enforceDevice ? "SIGNUP_DEVICE_NOT_ALLOWED" : "SIGNUP_IP_NOT_ALLOWED",
-        };
+        return { ok: false, code: "SIGNUP_IP_NOT_ALLOWED" };
       }
 
       const existingOrg = whitelisted.organization_id

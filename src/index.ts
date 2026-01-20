@@ -1,7 +1,6 @@
 import { unlink } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { config } from "@/config";
-import { getDeviceIdFromContext } from "@/lib/device";
 import { getClientIpFromContext } from "@/lib/ip";
 import { prisma } from "@/lib/prisma";
 import { startExpirationSweep } from "@/lib/scheduler";
@@ -13,6 +12,7 @@ import { adminRoutes } from "@/routes/admin";
 import { authRoutes } from "@/routes/auth";
 import { categoryRoutes } from "@/routes/categories";
 import { merchantRoutes } from "@/routes/merchants";
+import { notificationRoutes } from "@/routes/notifications";
 import { paymentRoutes } from "@/routes/payments";
 import { startTelegramBot } from "@/telegram/bot";
 import { cors } from "@elysiajs/cors";
@@ -72,17 +72,9 @@ const app = new Elysia()
         return { ok: false };
       }
 
-      const deviceId = getDeviceIdFromContext(ctx);
       const ip = getClientIpFromContext(ctx);
-      const deviceRow = deviceId
-        ? await prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId } })
-        : null;
-      if (deviceRow?.status === "INACTIVE") {
-        ctx.set.status = 404;
-        return { ok: false };
-      }
       const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
-      if (!deviceRow && ipRow?.status === "INACTIVE") {
+      if (ipRow?.status === "INACTIVE") {
         ctx.set.status = 404;
         return { ok: false };
       }
@@ -203,7 +195,13 @@ const app = new Elysia()
         }
       },
     },
-    (app) => app.use(adminRoutes).use(categoryRoutes).use(merchantRoutes).use(paymentRoutes),
+    (app) =>
+      app
+        .use(notificationRoutes)
+        .use(adminRoutes)
+        .use(categoryRoutes)
+        .use(merchantRoutes)
+        .use(paymentRoutes),
   )
   .use(authRoutes)
   .get("/health", () => ({ ok: true }))

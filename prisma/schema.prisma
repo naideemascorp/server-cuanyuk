@@ -24,6 +24,13 @@ enum UserRole {
   SUPER
 }
 
+enum NotificationImportance {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 model Organization {
   id           String       @id @default(uuid())
   created_date DateTime     @default(now())
@@ -40,6 +47,7 @@ model Organization {
   paymentItems PaymentItem[]
   ipWhitelist  IPWhitelist[]
   deviceWhitelist DeviceWhitelist[]
+  notifications Notification[]
 
   @@index([status, created_date])
 }
@@ -60,6 +68,7 @@ model User {
   password_hash     String
   email_verified_at DateTime?
   role              UserRole     @default(USER)
+  notifications_read_at DateTime?
 
   sessions          Session[]
   emailTokens       EmailVerificationToken[]
@@ -69,6 +78,25 @@ model User {
   @@unique([organization_id, username])
   @@unique([organization_id, email])
   @@index([status, email_verified_at])
+}
+
+model Notification {
+  id              String                 @id @default(uuid())
+  created_date    DateTime               @default(now())
+  updated_date    DateTime               @updatedAt
+  status          RecordStatus           @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization           @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  importance      NotificationImportance @default(LOW)
+  title           String
+  description     String
+  publish_at      DateTime               @default(now())
+
+  @@index([organization_id, status, publish_at])
 }
 
 model Session {

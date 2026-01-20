@@ -25,62 +25,6 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
   (app) =>
     app
       .get("/access", async () => ({ ok: true }))
-      .get("/devices", async () => {
-        const entries = await prisma.deviceWhitelist.findMany({
-          orderBy: [{ updated_date: "desc" }],
-          take: 200,
-        });
-        const rows = entries as Array<{
-          id: string;
-          device_id: string;
-          note: string | null;
-          status: string;
-          created_date: Date;
-          updated_date: Date;
-        }>;
-        return {
-          entries: rows.map((e) => ({
-            id: e.id,
-            deviceId: e.device_id,
-            note: e.note,
-            status: e.status,
-            createdDate: e.created_date,
-            updatedDate: e.updated_date,
-          })),
-        };
-      })
-      .post(
-        "/devices",
-        async (ctx) => {
-          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-          const body = ctx.body;
-          const set = ctx.set;
-          const deviceId = body.deviceId.trim();
-          const note = body.note?.trim() || null;
-          const status = body.status;
-
-          const saved = await prisma.deviceWhitelist.upsert({
-            where: { device_id: deviceId },
-            create: {
-              device_id: deviceId,
-              note,
-              status,
-              created_by: authUser.userId,
-              updated_by: authUser.userId,
-            },
-            update: { note, status, updated_by: authUser.userId },
-          });
-          set.status = 201;
-          return { entry: saved };
-        },
-        {
-          body: t.Object({
-            deviceId: t.String({ minLength: 8, maxLength: 120 }),
-            status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
-            note: t.Optional(t.String({ maxLength: 200 })),
-          }),
-        },
-      )
       .get("/ips", async () => {
         const entries = await prisma.iPWhitelist.findMany({
           orderBy: [{ updated_date: "desc" }],
@@ -134,6 +78,144 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             ip: t.String({ minLength: 3, maxLength: 120 }),
             status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
             note: t.Optional(t.String({ maxLength: 200 })),
+          }),
+        },
+      )
+      .get("/notifications", async (ctx) => {
+        const entries = await prisma.notification.findMany({
+          orderBy: [{ publish_at: "desc" }],
+          take: 200,
+        });
+        const rows = entries as Array<{
+          id: string;
+          title: string;
+          description: string;
+          importance: string;
+          publish_at: Date;
+          status: string;
+          created_date: Date;
+          updated_date: Date;
+        }>;
+        return {
+          entries: rows.map((e) => ({
+            id: e.id,
+            title: e.title,
+            description: e.description,
+            importance: e.importance,
+            publishAt: e.publish_at,
+            status: e.status,
+            createdDate: e.created_date,
+            updatedDate: e.updated_date,
+          })),
+        };
+      })
+      .post(
+        "/notifications",
+        async (ctx) => {
+          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+          const body = ctx.body;
+          const set = ctx.set;
+
+          const id = body.id?.trim() || null;
+          const title = body.title.trim();
+          const description = body.description.trim();
+          const importance = body.importance;
+          const status = body.status;
+          const publishAt = new Date(body.publishAt);
+          if (!Number.isFinite(publishAt.getTime())) {
+            set.status = 400;
+            return { ok: false, code: "INVALID_PUBLISH_AT" };
+          }
+
+          if (id) {
+            const updated = await prisma.$transaction(async (tx) => {
+              const existing = await tx.notification.findFirst({
+                where: { id },
+                select: { id: true },
+              });
+              if (!existing) return null;
+              const saved = await tx.notification.update({
+                where: { id },
+                data: {
+                  title,
+                  description,
+                  importance,
+                  status,
+                  publish_at: publishAt,
+                  updated_by: authUser.userId,
+                },
+              });
+              if (status === "ACTIVE") {
+                const active = await tx.notification.findMany({
+                  where: { status: "ACTIVE" },
+                  orderBy: [{ publish_at: "desc" }],
+                  select: { id: true },
+                  take: 50,
+                });
+                if (active.length > 10) {
+                  const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
+                  await tx.notification.updateMany({
+                    where: { id: { in: toDeactivate } },
+                    data: { status: "INACTIVE", updated_by: authUser.userId },
+                  });
+                }
+              }
+              return saved;
+            });
+            if (!updated) {
+              set.status = 404;
+              return { ok: false, code: "NOT_FOUND" };
+            }
+            set.status = 200;
+            return { entry: updated };
+          }
+
+          const created = await prisma.$transaction(async (tx) => {
+            const saved = await tx.notification.create({
+              data: {
+                organization_id: authUser.organizationId,
+                title,
+                description,
+                importance,
+                status,
+                publish_at: publishAt,
+                created_by: authUser.userId,
+                updated_by: authUser.userId,
+              },
+            });
+            if (status === "ACTIVE") {
+              const active = await tx.notification.findMany({
+                where: { status: "ACTIVE" },
+                orderBy: [{ publish_at: "desc" }],
+                select: { id: true },
+                take: 50,
+              });
+              if (active.length > 10) {
+                const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
+                await tx.notification.updateMany({
+                  where: { id: { in: toDeactivate } },
+                  data: { status: "INACTIVE", updated_by: authUser.userId },
+                });
+              }
+            }
+            return saved;
+          });
+          set.status = 201;
+          return { entry: created };
+        },
+        {
+          body: t.Object({
+            id: t.Optional(t.String({ minLength: 10, maxLength: 60 })),
+            title: t.String({ minLength: 2, maxLength: 120 }),
+            description: t.String({ minLength: 2, maxLength: 260 }),
+            importance: t.Union([
+              t.Literal("LOW"),
+              t.Literal("MEDIUM"),
+              t.Literal("HIGH"),
+              t.Literal("CRITICAL"),
+            ]),
+            status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
+            publishAt: t.String({ minLength: 10, maxLength: 40 }),
           }),
         },
       )
