@@ -1,8 +1,8 @@
+import { config } from "@/config";
+import { prisma } from "@/lib/prisma";
+import type { AuthUser } from "@/lib/types";
+import { wsRegistry } from "@/lib/ws";
 import { Elysia, t } from "elysia";
-import { config } from "../config";
-import { prisma } from "../lib/prisma";
-import { wsRegistry } from "../lib/ws";
-import type { AuthUser } from "../lib/types";
 
 const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
   if (!value || value.trim() === "") {
@@ -11,7 +11,7 @@ const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
   }
   const v = value.trim().toLowerCase();
   if (v === "lifetime" || v === "none") return null;
-  const m = v.match(/^(\d+)\s*(m|h|d)$/);
+  const m = RegExp(/^(\d+)\s*(m|h|d)$/).exec(v);
   if (!m) throw new Error("INVALID_EXPIRATION");
   const n = Number(m[1]);
   const unit = m[2];
@@ -20,10 +20,17 @@ const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
 };
 
 const sniffExt = (bytes: Uint8Array) => {
-  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "png";
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  )
+    return "png";
   if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xd8) return "jpg";
   if (bytes.length >= 6) {
-    const h = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
+    const h = String.fromCodePoint(bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]);
     if (h === "GIF87a" || h === "GIF89a") return "gif";
   }
   return "png";
@@ -51,8 +58,8 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         qris_mime: true,
         expires_at: true,
         created_date: true,
-        merchant: { select: { id: true, name: true, category: true } }
-      }
+        merchant: { select: { id: true, name: true, category: true } },
+      },
     });
     const rows = items as Array<{
       id: string;
@@ -73,15 +80,12 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         status: i.status,
         totalAmount: i.total_amount,
         paymentUrl: i.payment_url,
-        qrisUrl: i.qris_mime
-          ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}`
-          : i.qris_path
-            ? `${config.serverPublicBaseUrl}/uploads/${i.qris_path}`
-            : null,
+        qrisUrl:
+          i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
         expiresAt: i.expires_at,
         createdDate: i.created_date,
-        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category }
-      }))
+        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
+      })),
     };
   })
   .get("/active", async (ctx) => {
@@ -99,8 +103,8 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         qris_mime: true,
         expires_at: true,
         created_date: true,
-        merchant: { select: { id: true, name: true, category: true } }
-      }
+        merchant: { select: { id: true, name: true, category: true } },
+      },
     });
     const rows = items as Array<{
       id: string;
@@ -121,15 +125,12 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         status: i.status,
         totalAmount: i.total_amount,
         paymentUrl: i.payment_url,
-        qrisUrl: i.qris_mime
-          ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}`
-          : i.qris_path
-            ? `${config.serverPublicBaseUrl}/uploads/${i.qris_path}`
-            : null,
+        qrisUrl:
+          i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
         expiresAt: i.expires_at,
         createdDate: i.created_date,
-        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category }
-      }))
+        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
+      })),
     };
   })
   .post(
@@ -148,8 +149,8 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
           total_amount: Math.max(0, Math.trunc(body.totalAmount)),
           expires_at: expiresAt,
           created_by: authUser.userId,
-          updated_by: authUser.userId
-        }
+          updated_by: authUser.userId,
+        },
       });
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 201;
@@ -160,9 +161,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         merchantId: t.String({ minLength: 1 }),
         paymentUrl: t.String({ minLength: 8, maxLength: 2048 }),
         totalAmount: t.Number({ minimum: 0, maximum: 2_000_000_000 }),
-        expiration: t.Optional(t.String({ maxLength: 20 }))
-      })
-    }
+        expiration: t.Optional(t.String({ maxLength: 20 })),
+      }),
+    },
   )
   .post(
     "/qris",
@@ -172,11 +173,11 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       const set = ctx.set;
       const expiresAt = parseExpiry(body.expiration ?? null, 12 * 60);
       const b64 = body.imageBase64;
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+      const bytes = Uint8Array.from(atob(b64), (c) => c.codePointAt(0) ?? 0);
       if (bytes.length > 3_000_000) throw new Error("IMAGE_TOO_LARGE");
       const ext = sniffExt(bytes);
       const mime = extToMime(ext);
-      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
       const data = new Uint8Array(ab);
 
       const item = await prisma.paymentItem.create({
@@ -190,8 +191,8 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
           total_amount: Math.max(0, Math.trunc(body.totalAmount)),
           expires_at: expiresAt,
           created_by: authUser.userId,
-          updated_by: authUser.userId
-        }
+          updated_by: authUser.userId,
+        },
       });
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 201;
@@ -202,9 +203,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
         merchantId: t.String({ minLength: 1 }),
         imageBase64: t.String({ minLength: 64 }),
         totalAmount: t.Number({ minimum: 0, maximum: 2_000_000_000 }),
-        expiration: t.Optional(t.String({ maxLength: 20 }))
-      })
-    }
+        expiration: t.Optional(t.String({ maxLength: 20 })),
+      }),
+    },
   )
   .post(
     "/deactivate/:id",
@@ -214,11 +215,10 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       const set = ctx.set;
       await prisma.paymentItem.updateMany({
         where: { id: params.id, organization_id: authUser.organizationId },
-        data: { status: "INACTIVE", inactivated_at: new Date(), updated_by: authUser.userId }
+        data: { status: "INACTIVE", inactivated_at: new Date(), updated_by: authUser.userId },
       });
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 204;
-      return;
     },
-    { params: t.Object({ id: t.String() }) }
+    { params: t.Object({ id: t.String() }) },
   );

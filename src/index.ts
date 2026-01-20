@@ -1,22 +1,24 @@
+import { unlink } from "node:fs/promises";
+import { networkInterfaces } from "node:os";
+import { config } from "@/config";
+import { getDeviceIdFromContext } from "@/lib/device";
+import { getClientIpFromContext } from "@/lib/ip";
+import { prisma } from "@/lib/prisma";
+import { startExpirationSweep } from "@/lib/scheduler";
+import { makeShareToken, verifyShareToken } from "@/lib/share";
+import { resolveUploadPath } from "@/lib/storage";
+import type { AuthUser } from "@/lib/types";
+import { wsRegistry } from "@/lib/ws";
+import { adminRoutes } from "@/routes/admin";
+import { authRoutes } from "@/routes/auth";
+import { categoryRoutes } from "@/routes/categories";
+import { merchantRoutes } from "@/routes/merchants";
+import { paymentRoutes } from "@/routes/payments";
+import { startTelegramBot } from "@/telegram/bot";
 import { cors } from "@elysiajs/cors";
 import { jwt } from "@elysiajs/jwt";
 import { swagger } from "@elysiajs/swagger";
 import { Elysia, t } from "elysia";
-import { networkInterfaces } from "node:os";
-import { config } from "./config";
-import { startExpirationSweep } from "./lib/scheduler";
-import { resolveUploadPath } from "./lib/storage";
-import { wsRegistry } from "./lib/ws";
-import { prisma } from "./lib/prisma";
-import { makeShareToken, verifyShareToken } from "./lib/share";
-import { getClientIpFromContext } from "./lib/ip";
-import { authRoutes } from "./routes/auth";
-import { adminRoutes } from "./routes/admin";
-import { categoryRoutes } from "./routes/categories";
-import { merchantRoutes } from "./routes/merchants";
-import { paymentRoutes } from "./routes/payments";
-import { startTelegramBot } from "./telegram/bot";
-import type { AuthUser } from "./lib/types";
 
 const app = new Elysia()
   .decorate("authUser", null as AuthUser | null)
@@ -24,15 +26,15 @@ const app = new Elysia()
     cors({
       origin: config.corsOrigins,
       credentials: true,
-      allowedHeaders: ["content-type", "authorization"]
-    })
+      allowedHeaders: ["content-type", "authorization", "x-device-id"],
+    }),
   )
   .use(
     jwt({
       name: "jwt",
       secret: config.jwtSecret,
-      exp: "30m"
-    })
+      exp: "30m",
+    }),
   )
   .use(swagger({ path: "/docs" }))
   .derive(async ({ request, jwt, cookie }) => {
@@ -53,7 +55,7 @@ const app = new Elysia()
 
     const session = await prisma.session.findFirst({
       where: { user_id: sub, jwt_id: jti, status: "ACTIVE" },
-      select: { expires_at: true }
+      select: { expires_at: true },
     });
     if (!session || session.expires_at.getTime() < Date.now()) {
       return { authUser: null };
@@ -70,14 +72,24 @@ const app = new Elysia()
         return { ok: false };
       }
 
+      const deviceId = getDeviceIdFromContext(ctx);
       const ip = getClientIpFromContext(ctx);
+      const deviceRow = deviceId
+        ? await prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId } })
+        : null;
+      if (deviceRow?.status === "INACTIVE") {
+        ctx.set.status = 404;
+        return { ok: false };
+      }
       const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
-      if (ipRow?.status === "INACTIVE") {
+      if (!deviceRow && ipRow?.status === "INACTIVE") {
         ctx.set.status = 404;
         return { ok: false };
       }
 
-      const org = await prisma.organization.findFirst({ where: { id: verified.organizationId, status: "ACTIVE" } });
+      const org = await prisma.organization.findFirst({
+        where: { id: verified.organizationId, status: "ACTIVE" },
+      });
       if (!org) {
         ctx.set.status = 404;
         return { ok: false };
@@ -85,7 +97,7 @@ const app = new Elysia()
 
       const hasActiveUser = await prisma.user.findFirst({
         where: { organization_id: verified.organizationId, status: "ACTIVE" },
-        select: { id: true }
+        select: { id: true },
       });
       if (!hasActiveUser) {
         ctx.set.status = 404;
@@ -95,7 +107,7 @@ const app = new Elysia()
       const merchants = await prisma.merchant.findMany({
         where: { organization_id: verified.organizationId, status: "ACTIVE" },
         orderBy: [{ category: "asc" }, { name: "asc" }],
-        select: { id: true, name: true, category: true, picture_path: true, picture_mime: true }
+        select: { id: true, name: true, category: true, picture_path: true, picture_mime: true },
       });
 
       const items = await prisma.paymentItem.findMany({
@@ -111,8 +123,8 @@ const app = new Elysia()
           qris_mime: true,
           expires_at: true,
           created_date: true,
-          merchant: { select: { id: true, name: true, category: true } }
-        }
+          merchant: { select: { id: true, name: true, category: true } },
+        },
       });
 
       const merchantRows = merchants as Array<{
@@ -141,11 +153,10 @@ const app = new Elysia()
           id: m.id,
           name: m.name,
           category: m.category,
-          pictureUrl: m.picture_mime
-            ? `${config.serverPublicBaseUrl}/assets/merchant/${m.id}`
-            : m.picture_path
-              ? `${config.serverPublicBaseUrl}/uploads/${m.picture_path}`
-              : null
+          pictureUrl:
+            m.picture_mime || m.picture_path
+              ? `${config.serverPublicBaseUrl}/assets/merchant/${m.id}`
+              : null,
         })),
         items: itemRows.map((i) => ({
           id: i.id,
@@ -153,31 +164,34 @@ const app = new Elysia()
           status: i.status,
           totalAmount: i.total_amount,
           paymentUrl: i.payment_url,
-          qrisUrl: i.qris_mime
-            ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}`
-            : i.qris_path
-              ? `${config.serverPublicBaseUrl}/uploads/${i.qris_path}`
-              : null,
+          qrisUrl:
+            i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
           expiresAt: i.expires_at,
           createdDate: i.created_date,
-          merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category }
-        }))
+          merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
+        })),
       };
     },
-    { params: t.Object({ token: t.String({ minLength: 10 }) }) }
+    { params: t.Object({ token: t.String({ minLength: 10 }) }) },
   )
   .get("/auth/me", async ({ authUser }) => {
     if (!authUser) return { ok: false };
     const user = await prisma.user.findFirst({
       where: { id: authUser.userId, organization_id: authUser.organizationId, status: "ACTIVE" },
-      select: { id: true, username: true, email: true, organization_id: true, role: true }
+      select: { id: true, username: true, email: true, organization_id: true, role: true },
     });
     if (!user) return { ok: false };
     const shareToken = makeShareToken(user.organization_id);
     return {
       ok: true,
-      user: { id: user.id, username: user.username, email: user.email, organizationId: user.organization_id, role: user.role },
-      shareUrl: `${config.appPublicBaseUrl}/share/${shareToken}`
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        organizationId: user.organization_id,
+        role: user.role,
+      },
+      shareUrl: `${config.appPublicBaseUrl}/share/${shareToken}`,
     };
   })
   .guard(
@@ -187,87 +201,116 @@ const app = new Elysia()
           set.status = 401;
           return { ok: false, code: "UNAUTHORIZED" };
         }
-      }
+      },
     },
-    (app) =>
-      app
-        .use(adminRoutes)
-        .use(categoryRoutes)
-        .use(merchantRoutes)
-        .use(paymentRoutes)
+    (app) => app.use(adminRoutes).use(categoryRoutes).use(merchantRoutes).use(paymentRoutes),
   )
   .use(authRoutes)
   .get("/health", () => ({ ok: true }))
   .get(
     "/assets/merchant/:id",
     async ({ params, set }) => {
+      const mimeFromName = (name: string | null) => {
+        const ext = (name?.split(".").pop() ?? "").toLowerCase();
+        if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+        if (ext === "gif") return "image/gif";
+        if (ext === "webp") return "image/webp";
+        return "image/png";
+      };
       const row = await prisma.merchant.findFirst({
         where: { id: params.id, status: "ACTIVE" },
-        select: { picture_data: true, picture_mime: true, picture_path: true }
-      });
-      if (!row || !row.picture_data) {
-        set.status = 404;
-        return "not found";
-      }
-      set.headers["content-type"] = row.picture_mime ?? "image/png";
-      set.headers["cache-control"] = "public, max-age=3600";
-      const bytes = row.picture_data as unknown as Uint8Array;
-      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-      return new Response(ab);
-    },
-    { params: t.Object({ id: t.String({ minLength: 10 }) }) }
-  )
-  .get(
-    "/assets/qris/:id",
-    async ({ params, set }) => {
-      const row = await prisma.paymentItem.findFirst({
-        where: { id: params.id, status: "ACTIVE", kind: "QRIS" },
-        select: { qris_data: true, qris_mime: true, qris_path: true }
+        select: { picture_data: true, picture_mime: true, picture_path: true },
       });
       if (!row) {
         set.status = 404;
         return "not found";
       }
-      if (row.qris_data) {
-        set.headers["content-type"] = row.qris_mime ?? "image/png";
-        set.headers["cache-control"] = "public, max-age=3600";
-        const bytes = row.qris_data as unknown as Uint8Array;
-        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        return new Response(ab);
-      }
-      if (row.qris_path) {
-        const path = resolveUploadPath(row.qris_path);
+      let bytes = row.picture_data as unknown as Uint8Array | null;
+      let mime = row.picture_mime ?? "image/png";
+      if (!bytes && row.picture_path) {
+        const path = resolveUploadPath(row.picture_path);
         const file = Bun.file(path);
-        if (!(await file.exists())) {
-          set.status = 404;
-          return "not found";
+        if (await file.exists()) {
+          const ab = await file.arrayBuffer();
+          const next = new Uint8Array(ab);
+          const nextMime = mimeFromName(row.picture_path);
+          await prisma.merchant.update({
+            where: { id: params.id },
+            data: {
+              picture_data: next,
+              picture_mime: nextMime,
+              picture_path: null,
+              updated_by: "system",
+            },
+          });
+          void unlink(path).catch(() => {});
+          bytes = next;
+          mime = nextMime;
         }
-        set.headers["cache-control"] = "public, max-age=3600";
-        return file;
       }
-      set.status = 404;
-      return "not found";
+      if (!bytes) {
+        set.status = 404;
+        return "not found";
+      }
+      set.headers["content-type"] = mime;
+      set.headers["cache-control"] = "public, max-age=3600";
+      const ab = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      return new Response(ab);
     },
-    { params: t.Object({ id: t.String({ minLength: 10 }) }) }
+    { params: t.Object({ id: t.String({ minLength: 10 }) }) },
   )
   .get(
-    "/uploads/:filename",
+    "/assets/qris/:id",
     async ({ params, set }) => {
-      const filename = params.filename;
-      if (!/^[a-f0-9-]{36}\.[a-z0-9]+$/i.test(filename)) {
+      const mimeFromName = (name: string | null) => {
+        const ext = (name?.split(".").pop() ?? "").toLowerCase();
+        if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+        if (ext === "gif") return "image/gif";
+        if (ext === "webp") return "image/webp";
+        return "image/png";
+      };
+      const row = await prisma.paymentItem.findFirst({
+        where: { id: params.id, status: "ACTIVE", kind: "QRIS" },
+        select: { qris_data: true, qris_mime: true, qris_path: true },
+      });
+      if (!row) {
         set.status = 404;
         return "not found";
       }
-      const path = resolveUploadPath(filename);
-      const file = Bun.file(path);
-      if (!(await file.exists())) {
+      let bytes = row.qris_data as unknown as Uint8Array | null;
+      let mime = row.qris_mime ?? "image/png";
+      if (!bytes && row.qris_path) {
+        const path = resolveUploadPath(row.qris_path);
+        const file = Bun.file(path);
+        if (await file.exists()) {
+          const ab = await file.arrayBuffer();
+          const next = new Uint8Array(ab);
+          const nextMime = mimeFromName(row.qris_path);
+          await prisma.paymentItem.update({
+            where: { id: params.id },
+            data: { qris_data: next, qris_mime: nextMime, qris_path: null, updated_by: "system" },
+          });
+          void unlink(path).catch(() => {});
+          bytes = next;
+          mime = nextMime;
+        }
+      }
+      if (!bytes) {
         set.status = 404;
         return "not found";
       }
+      set.headers["content-type"] = mime;
       set.headers["cache-control"] = "public, max-age=3600";
-      return file;
+      const ab = bytes.buffer.slice(
+        bytes.byteOffset,
+        bytes.byteOffset + bytes.byteLength,
+      ) as ArrayBuffer;
+      return new Response(ab);
     },
-    { params: t.Object({ filename: t.String() }) }
+    { params: t.Object({ id: t.String({ minLength: 10 }) }) },
   )
   .ws("/ws", {
     open(ws) {
@@ -288,11 +331,11 @@ const app = new Elysia()
           wsRegistry.broadcast({ type: "items:changed" });
         }
       } catch {}
-    }
+    },
   })
   .listen({
     port: Number(process.env.PORT ?? 3001),
-    hostname: "0.0.0.0"
+    hostname: "0.0.0.0",
   });
 
 startExpirationSweep();
@@ -312,7 +355,13 @@ void (async () => {
       await prisma.iPWhitelist.upsert({
         where: { ip },
         update: { status: "ACTIVE", updated_by: "system" },
-        create: { ip, note: "local-dev", status: "ACTIVE", created_by: "system", updated_by: "system" }
+        create: {
+          ip,
+          note: "local-dev",
+          status: "ACTIVE",
+          created_by: "system",
+          updated_by: "system",
+        },
       });
     }
   } catch {}

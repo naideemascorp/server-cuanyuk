@@ -72,7 +72,13 @@ export const getClientIp = (headers: Headers, fallback?: string | null) => {
   const realIp = headers.get("x-real-ip");
   if (realIp) candidates.push(realIp);
   const xff = headers.get("x-forwarded-for");
-  if (xff) candidates.push(...xff.split(",").map((s) => s.trim()).filter(Boolean));
+  if (xff)
+    candidates.push(
+      ...xff
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
+    );
   candidates.push(...parseForwarded(headers));
 
   const normalized = candidates.map(normalizeIp).filter(Boolean);

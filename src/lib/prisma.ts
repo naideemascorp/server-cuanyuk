@@ -1,5 +1,5 @@
+import { config } from "@/config";
 import { PrismaClient } from "@prisma/client";
-import { config } from "../config";
 
 const withSchema = (raw: string, schema: string) => {
   const url = new URL(raw);
@@ -9,5 +9,5 @@ const withSchema = (raw: string, schema: string) => {
 
 export const prisma = new PrismaClient({
   log: ["error", "warn"],
-  datasources: { db: { url: withSchema(config.databaseUrl, config.databaseSchema) } }
+  datasources: { db: { url: withSchema(config.databaseUrl, config.databaseSchema) } },
 });

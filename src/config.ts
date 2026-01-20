@@ -68,7 +68,7 @@ export const config = {
     port: Number(required("SMTP_PORT")),
     user: required("SMTP_USER"),
     pass: required("SMTP_PASS"),
-    from: required("MAIL_FROM")
+    from: required("MAIL_FROM"),
   },
-  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
 };

@@ -1,5 +1,5 @@
-import { prisma } from "./prisma";
-import { wsRegistry } from "./ws";
+import { prisma } from "@/lib/prisma";
+import { wsRegistry } from "@/lib/ws";
 
 export const startExpirationSweep = () => {
   let pauseUntil = 0;
@@ -10,14 +10,14 @@ export const startExpirationSweep = () => {
       const expired = await prisma.paymentItem.findMany({
         where: {
           status: "ACTIVE",
-          expires_at: { not: null, lte: now }
+          expires_at: { not: null, lte: now },
         },
-        select: { id: true }
+        select: { id: true },
       });
       if (expired.length === 0) return;
       await prisma.paymentItem.updateMany({
         where: { id: { in: expired.map((e: { id: string }) => e.id) } },
-        data: { status: "INACTIVE", inactivated_at: now, updated_by: "system" }
+        data: { status: "INACTIVE", inactivated_at: now, updated_by: "system" },
       });
       wsRegistry.broadcast({ type: "items:changed" });
     } catch {

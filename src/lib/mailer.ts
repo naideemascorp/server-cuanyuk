@@ -1,16 +1,23 @@
+import { config } from "@/config";
 import nodemailer from "nodemailer";
-import { config } from "../config";
 
 export const mailer = nodemailer.createTransport({
   host: config.smtp.host,
   port: config.smtp.port,
   auth: {
     user: config.smtp.user,
-    pass: config.smtp.pass
-  }
+    pass: config.smtp.pass,
+  },
 });
 
-const baseEmailHtml = (opts: { title: string; preview: string; heading: string; bodyHtml: string; buttonText: string; buttonUrl: string }) => {
+const baseEmailHtml = (opts: {
+  title: string;
+  preview: string;
+  heading: string;
+  bodyHtml: string;
+  buttonText: string;
+  buttonUrl: string;
+}) => {
   const { title, preview, heading, bodyHtml, buttonText, buttonUrl } = opts;
   const safeUrl = buttonUrl.replaceAll('"', "%22");
   return `<!doctype html>
@@ -60,8 +67,8 @@ export const sendEmailVerification = async (to: string, verificationUrl: string)
       heading: "Verify your email",
       bodyHtml: "Tap the button below to verify your email and activate your account.",
       buttonText: "Verify Email",
-      buttonUrl: verificationUrl
-    })
+      buttonUrl: verificationUrl,
+    }),
   });
 };
 
@@ -77,7 +84,7 @@ export const sendPasswordResetEmail = async (to: string, resetUrl: string) => {
       heading: "Reset your password",
       bodyHtml: "We received a request to reset your password. This link expires in 1 day.",
       buttonText: "Reset Password",
-      buttonUrl: resetUrl
-    })
+      buttonUrl: resetUrl,
+    }),
   });
 };

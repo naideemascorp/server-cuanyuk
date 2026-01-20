@@ -18,4 +18,3 @@ export const storeUpload = async (bytes: Uint8Array, ext: string) => {
 };
 
 export const resolveUploadPath = (filename: string) => join(uploadsDir, filename);
-

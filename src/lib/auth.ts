@@ -1,5 +1,5 @@
+import { prisma } from "@/lib/prisma";
 import bcrypt from "bcryptjs";
-import { prisma } from "./prisma";
 
 export const hashPassword = async (plain: string) => bcrypt.hash(plain, 12);
 
@@ -14,7 +14,6 @@ export const getUserByUsername = async (organizationId: string, username: string
   prisma.user.findFirst({
     where: {
       organization_id: organizationId,
-      username: { equals: username, mode: "insensitive" }
-    }
+      username: { equals: username, mode: "insensitive" },
+    },
   });
-

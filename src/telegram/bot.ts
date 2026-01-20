@@ -1,9 +1,8 @@
+import { config } from "@/config";
+import { verifyPassword } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { wsRegistry } from "@/lib/ws";
 import { Bot, InlineKeyboard } from "grammy";
-import { config } from "../config";
-import { verifyPassword } from "../lib/auth";
-import { prisma } from "../lib/prisma";
-import { storeUpload } from "../lib/storage";
-import { wsRegistry } from "../lib/ws";
 
 type Stage =
   | { kind: "idle" }
@@ -14,7 +13,13 @@ type Stage =
   | { kind: "post_choose_kind"; userId: string; organizationId: string }
   | { kind: "post_link_merchant_name"; userId: string; organizationId: string }
   | { kind: "post_link_amount"; userId: string; organizationId: string; merchantId: string }
-  | { kind: "post_link_expiration"; userId: string; organizationId: string; merchantId: string; totalAmount: number }
+  | {
+      kind: "post_link_expiration";
+      userId: string;
+      organizationId: string;
+      merchantId: string;
+      totalAmount: number;
+    }
   | {
       kind: "post_link_url";
       userId: string;
@@ -24,13 +29,27 @@ type Stage =
       expiration: string;
     }
   | { kind: "post_qris_upload"; userId: string; organizationId: string }
-  | { kind: "post_qris_merchant_name"; userId: string; organizationId: string; qrisFilename: string }
-  | { kind: "post_qris_amount"; userId: string; organizationId: string; qrisFilename: string; merchantId: string }
+  | {
+      kind: "post_qris_merchant_name";
+      userId: string;
+      organizationId: string;
+      qrisBytes: Uint8Array<ArrayBuffer>;
+      qrisMime: string;
+    }
+  | {
+      kind: "post_qris_amount";
+      userId: string;
+      organizationId: string;
+      qrisBytes: Uint8Array<ArrayBuffer>;
+      qrisMime: string;
+      merchantId: string;
+    }
   | {
       kind: "post_qris_expiration";
       userId: string;
       organizationId: string;
-      qrisFilename: string;
+      qrisBytes: Uint8Array<ArrayBuffer>;
+      qrisMime: string;
       merchantId: string;
       totalAmount: number;
     };
@@ -72,7 +91,7 @@ const listMerchantsKeyboard = async (organizationId: string, actionPrefix: strin
   const merchants = await prisma.merchant.findMany({
     where: { organization_id: organizationId, status: "ACTIVE" },
     orderBy: [{ category: "asc" }, { name: "asc" }],
-    take: 40
+    take: 40,
   });
   const kb = new InlineKeyboard();
   for (const m of merchants) kb.text(m.name, `${actionPrefix}:${m.id}`).row();
@@ -84,7 +103,7 @@ const listCategoriesKeyboard = async (organizationId: string, actionPrefix: stri
     where: { organization_id: organizationId, status: "ACTIVE" },
     orderBy: [{ name: "asc" }],
     take: 40,
-    select: { id: true, name: true }
+    select: { id: true, name: true },
   });
   const kb = new InlineKeyboard();
   for (const c of categories) kb.text(c.name, `${actionPrefix}:${c.id}`).row();
@@ -107,7 +126,7 @@ const expirationKeyboard = (defaultLabel: string) =>
 
 const parseAmount = (text: string) => {
   const raw = text.replaceAll(/[^\d]/g, "");
-  const n = raw ? Number(raw) : NaN;
+  const n = raw ? Number(raw) : Number.NaN;
   if (!Number.isFinite(n) || n <= 0) return null;
   return Math.trunc(n);
 };
@@ -156,7 +175,7 @@ export const startTelegramBot = async () => {
         kind: "awaiting_password",
         organizationId: org.id,
         username,
-        attempts: 0
+        attempts: 0,
       });
       await ctx.reply("Enter your password.");
       return;
@@ -166,11 +185,17 @@ export const startTelegramBot = async () => {
       const user = await prisma.user.findFirst({
         where: {
           organization_id: stage.organizationId,
-          username: { equals: stage.username, mode: "insensitive" }
+          username: { equals: stage.username, mode: "insensitive" },
         },
-        select: { id: true, password_hash: true, status: true, email_verified_at: true, organization_id: true }
+        select: {
+          id: true,
+          password_hash: true,
+          status: true,
+          email_verified_at: true,
+          organization_id: true,
+        },
       });
-      if (!user || user.status !== "ACTIVE" || !user.email_verified_at) {
+      if (user?.status !== "ACTIVE" || !user.email_verified_at) {
         stages.delete(telegramId);
         await ctx.reply("Login unavailable. Use the web app to verify your account first.");
         return;
@@ -196,7 +221,7 @@ export const startTelegramBot = async () => {
       logins.set(telegramId, {
         userId: user.id,
         organizationId: user.organization_id,
-        expiresAt: Date.now() + 30 * 60 * 1000
+        expiresAt: Date.now() + 30 * 60 * 1000,
       });
       stages.delete(telegramId);
 
@@ -209,8 +234,8 @@ export const startTelegramBot = async () => {
           last_login_at: new Date(),
           created_by: user.id,
           updated_by: user.id,
-          status: "ACTIVE"
-        }
+          status: "ACTIVE",
+        },
       });
 
       await ctx.reply("Signed in. Available commands:", { reply_markup: loggedInKeyboard() });
@@ -225,7 +250,11 @@ export const startTelegramBot = async () => {
 
     if (stage.kind === "idle") {
       if (lower === "add category") {
-        stages.set(telegramId, { kind: "add_category_name", userId: login.userId, organizationId: login.organizationId });
+        stages.set(telegramId, {
+          kind: "add_category_name",
+          userId: login.userId,
+          organizationId: login.organizationId,
+        });
         await ctx.reply("Set category name.");
         return;
       }
@@ -234,7 +263,7 @@ export const startTelegramBot = async () => {
           where: { organization_id: login.organizationId, status: "ACTIVE" },
           orderBy: [{ name: "asc" }],
           take: 80,
-          select: { name: true }
+          select: { name: true },
         });
         if (categories.length === 0) {
           await ctx.reply("No category yet. Run: add category");
@@ -245,13 +274,17 @@ export const startTelegramBot = async () => {
       }
       if (lower === "add merchant") {
         const categoriesCount = await prisma.category.count({
-          where: { organization_id: login.organizationId, status: "ACTIVE" }
+          where: { organization_id: login.organizationId, status: "ACTIVE" },
         });
         if (categoriesCount === 0) {
           await ctx.reply("Create a category first: add category");
           return;
         }
-        stages.set(telegramId, { kind: "add_merchant_name", userId: login.userId, organizationId: login.organizationId });
+        stages.set(telegramId, {
+          kind: "add_merchant_name",
+          userId: login.userId,
+          organizationId: login.organizationId,
+        });
         await ctx.reply("Set merchant name.");
         return;
       }
@@ -259,7 +292,7 @@ export const startTelegramBot = async () => {
         const merchants = await prisma.merchant.findMany({
           where: { organization_id: login.organizationId, status: "ACTIVE" },
           orderBy: [{ category: "asc" }, { name: "asc" }],
-          take: 60
+          take: 60,
         });
         if (merchants.length === 0) {
           await ctx.reply("No merchant yet. Run: add merchant");
@@ -273,18 +306,22 @@ export const startTelegramBot = async () => {
       }
       if (lower === "post") {
         const merchantsCount = await prisma.merchant.count({
-          where: { organization_id: login.organizationId, status: "ACTIVE" }
+          where: { organization_id: login.organizationId, status: "ACTIVE" },
         });
         if (merchantsCount === 0) {
           await ctx.reply("Create a merchant first: add merchant");
           return;
         }
-        stages.set(telegramId, { kind: "post_choose_kind", userId: login.userId, organizationId: login.organizationId });
+        stages.set(telegramId, {
+          kind: "post_choose_kind",
+          userId: login.userId,
+          organizationId: login.organizationId,
+        });
         await ctx.reply("Choose:", {
           reply_markup: new InlineKeyboard()
             .text("Post Payment Link", "post:link")
             .row()
-            .text("Post QRIS", "post:qris")
+            .text("Post QRIS", "post:qris"),
         });
         return;
       }
@@ -303,9 +340,9 @@ export const startTelegramBot = async () => {
           name,
           status: "ACTIVE",
           created_by: stage.userId,
-          updated_by: stage.userId
+          updated_by: stage.userId,
         },
-        update: { status: "ACTIVE", updated_by: stage.userId }
+        update: { status: "ACTIVE", updated_by: stage.userId },
       });
       stages.delete(telegramId);
       await ctx.reply("Category added.", { reply_markup: loggedInKeyboard() });
@@ -328,7 +365,7 @@ export const startTelegramBot = async () => {
         kind: "add_merchant_choose_category",
         userId: login.userId,
         organizationId: login.organizationId,
-        name
+        name,
       });
       await ctx.reply("Choose category:", { reply_markup: kb });
       return;
@@ -342,15 +379,24 @@ export const startTelegramBot = async () => {
       }
       const existing =
         (await prisma.merchant.findFirst({
-          where: { organization_id: stage.organizationId, name: { equals: name, mode: "insensitive" }, status: "ACTIVE" },
-          select: { id: true }
+          where: {
+            organization_id: stage.organizationId,
+            name: { equals: name, mode: "insensitive" },
+            status: "ACTIVE",
+          },
+          select: { id: true },
         })) ?? null;
       if (!existing?.id) {
         await ctx.reply("Merchant not found. Run: merchant list");
         return;
       }
       const merchantId = existing.id;
-      stages.set(telegramId, { kind: "post_link_amount", userId: stage.userId, organizationId: stage.organizationId, merchantId });
+      stages.set(telegramId, {
+        kind: "post_link_amount",
+        userId: stage.userId,
+        organizationId: stage.organizationId,
+        merchantId,
+      });
       await ctx.reply("Enter payment total amount (numbers only).");
       return;
     }
@@ -366,9 +412,11 @@ export const startTelegramBot = async () => {
         userId: stage.userId,
         organizationId: stage.organizationId,
         merchantId: stage.merchantId,
-        totalAmount: amount
+        totalAmount: amount,
       });
-      await ctx.reply("Set expiration (optional):", { reply_markup: expirationKeyboard("default: 12h") });
+      await ctx.reply("Set expiration (optional):", {
+        reply_markup: expirationKeyboard("default: 12h"),
+      });
       return;
     }
 
@@ -384,8 +432,8 @@ export const startTelegramBot = async () => {
           expires_at: expiresAt,
           created_by: stage.userId,
           updated_by: stage.userId,
-          status: "ACTIVE"
-        }
+          status: "ACTIVE",
+        },
       });
       stages.delete(telegramId);
       wsRegistry.broadcast({ type: "items:changed" });
@@ -401,8 +449,12 @@ export const startTelegramBot = async () => {
       }
       const existing =
         (await prisma.merchant.findFirst({
-          where: { organization_id: stage.organizationId, name: { equals: name, mode: "insensitive" }, status: "ACTIVE" },
-          select: { id: true }
+          where: {
+            organization_id: stage.organizationId,
+            name: { equals: name, mode: "insensitive" },
+            status: "ACTIVE",
+          },
+          select: { id: true },
         })) ?? null;
       if (!existing?.id) {
         await ctx.reply("Merchant not found. Run: merchant list");
@@ -413,8 +465,9 @@ export const startTelegramBot = async () => {
         kind: "post_qris_amount",
         userId: stage.userId,
         organizationId: stage.organizationId,
-        qrisFilename: stage.qrisFilename,
-        merchantId
+        qrisBytes: stage.qrisBytes,
+        qrisMime: stage.qrisMime,
+        merchantId,
       });
       await ctx.reply("Enter payment total amount (numbers only).");
       return;
@@ -430,11 +483,14 @@ export const startTelegramBot = async () => {
         kind: "post_qris_expiration",
         userId: stage.userId,
         organizationId: stage.organizationId,
-        qrisFilename: stage.qrisFilename,
+        qrisBytes: stage.qrisBytes,
+        qrisMime: stage.qrisMime,
         merchantId: stage.merchantId,
-        totalAmount: amount
+        totalAmount: amount,
       });
-      await ctx.reply("Set expiration (optional):", { reply_markup: expirationKeyboard("default: 12h") });
+      await ctx.reply("Set expiration (optional):", {
+        reply_markup: expirationKeyboard("default: 12h"),
+      });
       return;
     }
 
@@ -450,7 +506,7 @@ export const startTelegramBot = async () => {
       return;
     }
     const stage = stages.get(telegramId);
-    if (!stage || stage.kind !== "post_qris_upload") return;
+    if (stage?.kind !== "post_qris_upload") return;
 
     const photo = ctx.message.photo.at(-1);
     if (!photo) return;
@@ -458,14 +514,15 @@ export const startTelegramBot = async () => {
     const file = await ctx.api.getFile(photo.file_id);
     const url = `https://api.telegram.org/file/bot${config.telegramBotToken}/${file.file_path}`;
     const res = await fetch(url);
-    const bytes = new Uint8Array(await res.arrayBuffer());
-    const stored = await storeUpload(bytes, ".jpg");
+    const ab = (await res.arrayBuffer()) as ArrayBuffer;
+    const bytes = new Uint8Array(ab);
 
     stages.set(telegramId, {
       kind: "post_qris_merchant_name",
       userId: login.userId,
       organizationId: login.organizationId,
-      qrisFilename: stored.filename
+      qrisBytes: bytes,
+      qrisMime: "image/jpeg",
     });
     await ctx.reply("Enter merchant name.");
   });
@@ -480,12 +537,18 @@ export const startTelegramBot = async () => {
       return;
     }
     await ctx.answerCallbackQuery();
-    const categoriesCount = await prisma.category.count({ where: { organization_id: login.organizationId, status: "ACTIVE" } });
+    const categoriesCount = await prisma.category.count({
+      where: { organization_id: login.organizationId, status: "ACTIVE" },
+    });
     if (categoriesCount === 0) {
       await ctx.reply("Create a category first: add category");
       return;
     }
-    stages.set(telegramId, { kind: "add_merchant_name", userId: login.userId, organizationId: login.organizationId });
+    stages.set(telegramId, {
+      kind: "add_merchant_name",
+      userId: login.userId,
+      organizationId: login.organizationId,
+    });
     await ctx.reply("Set merchant name.");
   });
 
@@ -498,7 +561,11 @@ export const startTelegramBot = async () => {
       await ctx.reply("Please sign in first: sign in <username>");
       return;
     }
-    stages.set(telegramId, { kind: "add_category_name", userId: login.userId, organizationId: login.organizationId });
+    stages.set(telegramId, {
+      kind: "add_category_name",
+      userId: login.userId,
+      organizationId: login.organizationId,
+    });
     await ctx.answerCallbackQuery();
     await ctx.reply("Set category name.");
   });
@@ -516,7 +583,7 @@ export const startTelegramBot = async () => {
       where: { organization_id: login.organizationId, status: "ACTIVE" },
       orderBy: [{ name: "asc" }],
       take: 80,
-      select: { name: true }
+      select: { name: true },
     });
     await ctx.answerCallbackQuery();
     if (categories.length === 0) {
@@ -538,14 +605,16 @@ export const startTelegramBot = async () => {
     const merchants = await prisma.merchant.findMany({
       where: { organization_id: login.organizationId, status: "ACTIVE" },
       orderBy: [{ category: "asc" }, { name: "asc" }],
-      take: 60
+      take: 60,
     });
     await ctx.answerCallbackQuery();
     if (merchants.length === 0) {
       await ctx.reply("No merchant yet. Run: add merchant");
       return;
     }
-    const lines = merchants.map((m: { category: string; name: string }) => `• ${m.category} — ${m.name}`).join("\n");
+    const lines = merchants
+      .map((m: { category: string; name: string }) => `• ${m.category} — ${m.name}`)
+      .join("\n");
     await ctx.reply(lines);
   });
 
@@ -558,14 +627,18 @@ export const startTelegramBot = async () => {
       await ctx.reply("Please sign in first: sign in <username>");
       return;
     }
-    stages.set(telegramId, { kind: "post_choose_kind", userId: login.userId, organizationId: login.organizationId });
+    stages.set(telegramId, {
+      kind: "post_choose_kind",
+      userId: login.userId,
+      organizationId: login.organizationId,
+    });
     await ctx.answerCallbackQuery();
-    await ctx.reply(
-      "Choose:",
-      {
-        reply_markup: new InlineKeyboard().text("Post Payment Link", "post:link").row().text("Post QRIS", "post:qris")
-      }
-    );
+    await ctx.reply("Choose:", {
+      reply_markup: new InlineKeyboard()
+        .text("Post Payment Link", "post:link")
+        .row()
+        .text("Post QRIS", "post:qris"),
+    });
   });
 
   bot.callbackQuery("post:link", async (ctx) => {
@@ -578,12 +651,18 @@ export const startTelegramBot = async () => {
       return;
     }
     await ctx.answerCallbackQuery();
-    const merchantsCount = await prisma.merchant.count({ where: { organization_id: login.organizationId, status: "ACTIVE" } });
+    const merchantsCount = await prisma.merchant.count({
+      where: { organization_id: login.organizationId, status: "ACTIVE" },
+    });
     if (merchantsCount === 0) {
       await ctx.reply("Create a merchant first: add merchant");
       return;
     }
-    stages.set(telegramId, { kind: "post_link_merchant_name", userId: login.userId, organizationId: login.organizationId });
+    stages.set(telegramId, {
+      kind: "post_link_merchant_name",
+      userId: login.userId,
+      organizationId: login.organizationId,
+    });
     await ctx.reply("Enter merchant name.");
   });
 
@@ -597,12 +676,18 @@ export const startTelegramBot = async () => {
       return;
     }
     await ctx.answerCallbackQuery();
-    const merchantsCount = await prisma.merchant.count({ where: { organization_id: login.organizationId, status: "ACTIVE" } });
+    const merchantsCount = await prisma.merchant.count({
+      where: { organization_id: login.organizationId, status: "ACTIVE" },
+    });
     if (merchantsCount === 0) {
       await ctx.reply("Create a merchant first: add merchant");
       return;
     }
-    stages.set(telegramId, { kind: "post_qris_upload", userId: login.userId, organizationId: login.organizationId });
+    stages.set(telegramId, {
+      kind: "post_qris_upload",
+      userId: login.userId,
+      organizationId: login.organizationId,
+    });
     await ctx.reply("Upload the QRIS image now.");
   });
 
@@ -612,14 +697,14 @@ export const startTelegramBot = async () => {
     const login = await requireLogin(telegramId);
     if (!login) return;
     const stage = stages.get(telegramId);
-    if (!stage || stage.kind !== "add_merchant_choose_category") {
+    if (stage?.kind !== "add_merchant_choose_category") {
       await ctx.answerCallbackQuery();
       return;
     }
     const categoryId = ctx.match?.[1] ?? "";
     const category = await prisma.category.findFirst({
       where: { id: categoryId, organization_id: stage.organizationId, status: "ACTIVE" },
-      select: { name: true }
+      select: { name: true },
     });
     await ctx.answerCallbackQuery();
     if (!category) {
@@ -633,11 +718,13 @@ export const startTelegramBot = async () => {
         category: category.name,
         created_by: stage.userId,
         updated_by: stage.userId,
-        status: "ACTIVE"
-      }
+        status: "ACTIVE",
+      },
     });
     stages.delete(telegramId);
-    await ctx.reply(`Merchant added: ${merchant.name}. Type: merchant list`, { reply_markup: loggedInKeyboard() });
+    await ctx.reply(`Merchant added: ${merchant.name}. Type: merchant list`, {
+      reply_markup: loggedInKeyboard(),
+    });
   });
 
   bot.callbackQuery(/^exp:(.+)$/i, async (ctx) => {
@@ -657,7 +744,7 @@ export const startTelegramBot = async () => {
         organizationId: stage.organizationId,
         merchantId: stage.merchantId,
         totalAmount: stage.totalAmount,
-        expiration
+        expiration,
       });
       await ctx.answerCallbackQuery();
       await ctx.reply("Send the payment link URL.");
@@ -673,13 +760,15 @@ export const startTelegramBot = async () => {
           organization_id: stage.organizationId,
           merchant_id: stage.merchantId,
           kind: "QRIS",
-          qris_path: stage.qrisFilename,
+          qris_path: null,
+          qris_mime: stage.qrisMime,
+          qris_data: stage.qrisBytes,
           total_amount: stage.totalAmount,
           expires_at: expiresAt,
           status: "ACTIVE",
           created_by: stage.userId,
-          updated_by: stage.userId
-        }
+          updated_by: stage.userId,
+        },
       });
       stages.delete(telegramId);
       wsRegistry.broadcast({ type: "items:changed" });

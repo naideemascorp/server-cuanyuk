@@ -1,6 +1,6 @@
+import { prisma } from "@/lib/prisma";
+import type { AuthUser } from "@/lib/types";
 import { Elysia, t } from "elysia";
-import { prisma } from "../lib/prisma";
-import type { AuthUser } from "../lib/types";
 
 export const categoryRoutes = new Elysia({ prefix: "/categories" })
   .get("/", async (ctx) => {
@@ -9,12 +9,12 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
       prisma.category.findMany({
         where: { organization_id: authUser.organizationId, status: "ACTIVE" },
         orderBy: [{ name: "asc" }],
-        select: { id: true, name: true }
+        select: { id: true, name: true },
       }),
       prisma.merchant.findMany({
         where: { organization_id: authUser.organizationId, status: "ACTIVE" },
-        select: { category: true }
-      })
+        select: { category: true },
+      }),
     ]);
 
     const merged = new Map<string, { id: string | null; name: string }>();
@@ -41,13 +41,13 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
           name,
           status: "ACTIVE",
           created_by: authUser.userId,
-          updated_by: authUser.userId
+          updated_by: authUser.userId,
         },
         update: { status: "ACTIVE", updated_by: authUser.userId },
-        select: { id: true, name: true }
+        select: { id: true, name: true },
       });
       set.status = 201;
       return { category: created };
     },
-    { body: t.Object({ name: t.String({ minLength: 2, maxLength: 80 }) }) }
+    { body: t.Object({ name: t.String({ minLength: 2, maxLength: 80 }) }) },
   );

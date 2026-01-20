@@ -1,12 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { config } from "../config";
+import { config } from "@/config";
 
 const b64url = (buf: Buffer) =>
-  buf
-    .toString("base64")
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
+  buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
 
 export const makeShareToken = (organizationId: string) => {
   const sig = createHmac("sha256", config.jwtSecret).update(`share:${organizationId}`).digest();
@@ -19,7 +15,9 @@ export const verifyShareToken = (token: string) => {
   const [organizationId, sigPart] = parts;
   if (!organizationId || !sigPart) return null;
 
-  const expected = createHmac("sha256", config.jwtSecret).update(`share:${organizationId}`).digest();
+  const expected = createHmac("sha256", config.jwtSecret)
+    .update(`share:${organizationId}`)
+    .digest();
   const expectedPart = b64url(expected).slice(0, 32);
 
   const a = Buffer.from(expectedPart);
@@ -29,4 +27,3 @@ export const verifyShareToken = (token: string) => {
 
   return { organizationId };
 };
-

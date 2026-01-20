@@ -1,16 +1,17 @@
-import { Elysia, t } from "elysia";
 import { randomBytes, randomUUID } from "node:crypto";
-import { config } from "../config";
-import { hashPassword, verifyPassword } from "../lib/auth";
-import { getClientIpFromContext } from "../lib/ip";
-import { sendEmailVerification, sendPasswordResetEmail } from "../lib/mailer";
-import { prisma } from "../lib/prisma";
+import { config } from "@/config";
+import { hashPassword, verifyPassword } from "@/lib/auth";
+import { getDeviceIdFromContext } from "@/lib/device";
+import { getClientIpFromContext } from "@/lib/ip";
+import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
+import { prisma } from "@/lib/prisma";
+import { Elysia, t } from "elysia";
 
 const oneDayMs = 24 * 60 * 60 * 1000;
 const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   return await Promise.race([
     promise,
-    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), ms))
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), ms)),
   ]);
 };
 
@@ -21,17 +22,45 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
     const ip = getClientIpFromContext(ctx);
     try {
-      const whitelisted = await withTimeout(prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }), 1200);
-      const allowed = Boolean(whitelisted);
+      const deviceId = getDeviceIdFromContext(ctx);
+      const activeDeviceCount = (await withTimeout(
+        prisma.deviceWhitelist.count({ where: { status: "ACTIVE" } }),
+        1200,
+      )) as number;
+      const enforceDevice = activeDeviceCount > 0;
 
-      if (!wantsHtml) return { allowed, ip };
+      const deviceAllowed = enforceDevice
+        ? deviceId
+          ? Boolean(
+              await withTimeout(
+                prisma.deviceWhitelist.findFirst({
+                  where: { device_id: deviceId, status: "ACTIVE" },
+                }),
+                1200,
+              ),
+            )
+          : false
+        : false;
+
+      const ipAllowed = enforceDevice
+        ? false
+        : Boolean(
+            await withTimeout(
+              prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }),
+              1200,
+            ),
+          );
+
+      const allowed = enforceDevice ? deviceAllowed : ipAllowed;
+
+      if (!wantsHtml) return { allowed, ip, deviceId };
       if (!allowed) {
         return new Response("Not Found", {
           status: 404,
           headers: {
             "content-type": "text/plain; charset=utf-8",
-            "cache-control": "no-store"
-          }
+            "cache-control": "no-store",
+          },
         });
       }
 
@@ -72,9 +101,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         <div class="inner">
           <div>
             <h1>Sign Up</h1>
-            <div class="sub">This is the backend sign-up page. IP allow-list is enforced.</div>
+            <div class="sub">This is the backend sign-up page. Device allow-list is enforced.</div>
           </div>
-          <div class="pill">Client IP detected: <span id="ip">${ip}</span> • Signup allowed: <span id="allowed">${allowed ? "YES" : "NO"}</span></div>
+          <div class="pill">Device ID: <span id="device">${deviceId ?? "(missing)"}</span> • Signup allowed: <span id="allowed">${allowed ? "YES" : "NO"}</span></div>
           <div class="grid">
             <div class="card" style="grid-column: span 7;">
               <div class="cardInner">
@@ -149,8 +178,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       return new Response(html, {
         headers: {
           "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store"
-        }
+          "cache-control": "no-store",
+        },
       });
     } catch {
       if (!wantsHtml) return { allowed: false, ok: false, code: "DB_NOT_READY" };
@@ -185,9 +214,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       return new Response(html, {
         headers: {
           "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store"
+          "cache-control": "no-store",
         },
-        status: 503
+        status: 503,
       });
     }
   })
@@ -197,27 +226,47 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const body = ctx.body;
       const set = ctx.set;
       const ip = getClientIpFromContext(ctx);
+      const deviceId = getDeviceIdFromContext(ctx);
+      const enforceDevice =
+        ((await withTimeout(
+          prisma.deviceWhitelist.count({ where: { status: "ACTIVE" } }),
+          1200,
+        )) as number) > 0;
+
       let whitelisted: { organization_id: string | null } | null = null;
       try {
-        whitelisted = await withTimeout(
-          prisma.iPWhitelist.findFirst({
-            where: { ip, status: "ACTIVE" },
-            select: { organization_id: true }
-          }),
-          1200
-        );
+        whitelisted = enforceDevice
+          ? deviceId
+            ? await withTimeout(
+                prisma.deviceWhitelist.findFirst({
+                  where: { device_id: deviceId, status: "ACTIVE" },
+                  select: { organization_id: true },
+                }),
+                1200,
+              )
+            : null
+          : await withTimeout(
+              prisma.iPWhitelist.findFirst({
+                where: { ip, status: "ACTIVE" },
+                select: { organization_id: true },
+              }),
+              1200,
+            );
       } catch {
         set.status = 503;
         return { ok: false, code: "DB_NOT_READY" };
       }
       if (!whitelisted) {
         set.status = 403;
-        return { ok: false, code: "SIGNUP_IP_NOT_ALLOWED" };
+        return {
+          ok: false,
+          code: enforceDevice ? "SIGNUP_DEVICE_NOT_ALLOWED" : "SIGNUP_IP_NOT_ALLOWED",
+        };
       }
 
       const existingOrg = whitelisted.organization_id
         ? await prisma.organization.findFirst({
-            where: { id: whitelisted.organization_id, status: "ACTIVE" }
+            where: { id: whitelisted.organization_id, status: "ACTIVE" },
           })
         : null;
 
@@ -227,8 +276,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           data: {
             display_name: "Workspace",
             created_by: "system",
-            updated_by: "system"
-          }
+            updated_by: "system",
+          },
         }));
 
       const username = body.username.trim();
@@ -243,8 +292,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           password_hash: passwordHash,
           status: "PENDING",
           created_by: "system",
-          updated_by: "system"
-        }
+          updated_by: "system",
+        },
       });
 
       const token = randomBytes(32).toString("hex");
@@ -257,8 +306,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           expires_at: expiresAt,
           status: "ACTIVE",
           created_by: user.id,
-          updated_by: user.id
-        }
+          updated_by: user.id,
+        },
       });
 
       const verifyUrl = `${config.appPublicBaseUrl}/verify-email?token=${token}`;
@@ -271,9 +320,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       body: t.Object({
         username: t.String({ minLength: 3, maxLength: 64 }),
         email: t.String({ format: "email", maxLength: 320 }),
-        password: t.String({ minLength: 8, maxLength: 256 })
-      })
-    }
+        password: t.String({ minLength: 8, maxLength: 256 }),
+      }),
+    },
   )
   .get(
     "/verify-email",
@@ -281,7 +330,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const token = query.token.trim();
       const row = await prisma.emailVerificationToken.findFirst({
         where: { token, status: "ACTIVE" },
-        include: { user: true }
+        include: { user: true },
       });
       if (!row) {
         set.status = 400;
@@ -293,7 +342,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       if (row.expires_at.getTime() < Date.now()) {
         await prisma.emailVerificationToken.update({
           where: { id: row.id },
-          data: { status: "INACTIVE", updated_by: "system" }
+          data: { status: "INACTIVE", updated_by: "system" },
         });
         set.status = 400;
         return { ok: false, code: "TOKEN_EXPIRED" };
@@ -302,17 +351,17 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       await prisma.$transaction([
         prisma.emailVerificationToken.update({
           where: { id: row.id },
-          data: { consumed_at: new Date(), status: "INACTIVE", updated_by: "system" }
+          data: { consumed_at: new Date(), status: "INACTIVE", updated_by: "system" },
         }),
         prisma.user.update({
           where: { id: row.user_id },
-          data: { email_verified_at: new Date(), status: "ACTIVE", updated_by: "system" }
-        })
+          data: { email_verified_at: new Date(), status: "ACTIVE", updated_by: "system" },
+        }),
       ]);
 
       return { ok: true };
     },
-    { query: t.Object({ token: t.String({ minLength: 10 }) }) }
+    { query: t.Object({ token: t.String({ minLength: 10 }) }) },
   )
   .post(
     "/password-reset/request",
@@ -331,11 +380,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
       const user = await prisma.user.findFirst({
         where: {
-          OR: [{ email }, { username }, { username: usernameLower }]
+          OR: [{ email }, { username }, { username: usernameLower }],
         },
-        select: { id: true, email: true, status: true }
+        select: { id: true, email: true, status: true },
       });
-      if (!user || user.status !== "ACTIVE") {
+      if (user?.status !== "ACTIVE") {
         set.status = 404;
         return { ok: false, code: "USER_NOT_FOUND" };
       }
@@ -344,7 +393,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
       const sentToday = await prisma.passwordResetToken.count({
-        where: { user_id: user.id, created_date: { gte: startOfDay } }
+        where: { user_id: user.id, created_date: { gte: startOfDay } },
       });
       if (sentToday >= 3) {
         const retryAt = new Date(startOfDay.getTime() + oneDayMs);
@@ -355,13 +404,17 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const last = await prisma.passwordResetToken.findFirst({
         where: { user_id: user.id },
         orderBy: { created_date: "desc" },
-        select: { created_date: true }
+        select: { created_date: true },
       });
       if (last) {
         const nextAllowedAt = last.created_date.getTime() + 60_000;
         if (now < nextAllowedAt) {
           set.status = 429;
-          return { ok: false, code: "RESEND_COOLDOWN", nextAllowedAt: new Date(nextAllowedAt).toISOString() };
+          return {
+            ok: false,
+            code: "RESEND_COOLDOWN",
+            nextAllowedAt: new Date(nextAllowedAt).toISOString(),
+          };
         }
       }
 
@@ -370,7 +423,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       await prisma.$transaction([
         prisma.passwordResetToken.updateMany({
           where: { user_id: user.id, status: "ACTIVE" },
-          data: { status: "INACTIVE", updated_by: "system" }
+          data: { status: "INACTIVE", updated_by: "system" },
         }),
         prisma.passwordResetToken.create({
           data: {
@@ -379,9 +432,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
             expires_at: expiresAt,
             status: "ACTIVE",
             created_by: user.id,
-            updated_by: user.id
-          }
-        })
+            updated_by: user.id,
+          },
+        }),
       ]);
 
       const resetUrl = `${config.appPublicBaseUrl}/reset-password/${token}`;
@@ -391,10 +444,15 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       return {
         ok: true,
         nextAllowedAt: new Date(Date.now() + 60_000).toISOString(),
-        remainingToday: Math.max(0, 3 - (sentToday + 1))
+        remainingToday: Math.max(0, 3 - (sentToday + 1)),
       };
     },
-    { body: t.Object({ email: t.Optional(t.String({ maxLength: 320 })), identifier: t.Optional(t.String({ maxLength: 320 })) }) }
+    {
+      body: t.Object({
+        email: t.Optional(t.String({ maxLength: 320 })),
+        identifier: t.Optional(t.String({ maxLength: 320 })),
+      }),
+    },
   )
   .post(
     "/password-reset/confirm",
@@ -410,7 +468,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
       const row = await prisma.passwordResetToken.findFirst({
         where: { token, status: "ACTIVE" },
-        include: { user: true }
+        include: { user: true },
       });
       if (!row || row.consumed_at) {
         set.status = 400;
@@ -419,7 +477,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       if (row.expires_at.getTime() < Date.now()) {
         await prisma.passwordResetToken.update({
           where: { id: row.id },
-          data: { status: "INACTIVE", updated_by: "system" }
+          data: { status: "INACTIVE", updated_by: "system" },
         });
         set.status = 400;
         return { ok: false, code: "TOKEN_EXPIRED" };
@@ -430,16 +488,16 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       await prisma.$transaction([
         prisma.passwordResetToken.update({
           where: { id: row.id },
-          data: { consumed_at: now, status: "INACTIVE", updated_by: "system" }
+          data: { consumed_at: now, status: "INACTIVE", updated_by: "system" },
         }),
         prisma.user.update({
           where: { id: row.user_id },
-          data: { password_hash: passwordHash, updated_by: "system" }
+          data: { password_hash: passwordHash, updated_by: "system" },
         }),
         prisma.session.updateMany({
           where: { user_id: row.user_id, status: "ACTIVE" },
-          data: { status: "INACTIVE", revoked_at: now, updated_by: "system" }
-        })
+          data: { status: "INACTIVE", revoked_at: now, updated_by: "system" },
+        }),
       ]);
 
       return { ok: true };
@@ -447,14 +505,16 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     {
       body: t.Object({
         token: t.String({ minLength: 10 }),
-        newPassword: t.String({ minLength: 8, maxLength: 256 })
-      })
-    }
+        newPassword: t.String({ minLength: 8, maxLength: 256 }),
+      }),
+    },
   )
   .post(
     "/signin",
     async (ctx) => {
-      type JwtSigner = { sign: (payload: { sub: string; org: string; jti: string }) => Promise<string> };
+      type JwtSigner = {
+        sign: (payload: { sub: string; org: string; jti: string }) => Promise<string>;
+      };
       type CookieSession = {
         session: {
           set: (opts: {
@@ -492,8 +552,8 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           organization_id: true,
           username: true,
           email: true,
-          role: true
-        }
+          role: true,
+        },
       });
       if (!user) {
         set.status = 401;
@@ -522,14 +582,14 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           expires_at: expiresAt,
           status: "ACTIVE",
           created_by: user.id,
-          updated_by: user.id
-        }
+          updated_by: user.id,
+        },
       });
 
       const token = await jwt.sign({
         sub: user.id,
         org: user.organization_id,
-        jti: jwtId
+        jti: jwtId,
       });
 
       cookie.session.set({
@@ -538,25 +598,30 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         sameSite: config.cookie.sameSite,
         secure: config.cookie.secure,
         path: "/",
-        expires: expiresAt
+        expires: expiresAt,
       });
 
       return {
         ok: true,
         token,
-        user: { id: user.id, username: user.username, email: user.email, organizationId: user.organization_id, role: user.role }
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          organizationId: user.organization_id,
+          role: user.role,
+        },
       };
     },
     {
       body: t.Object({
         identifier: t.Optional(t.String({ maxLength: 320 })),
         email: t.Optional(t.String({ maxLength: 320 })),
-        password: t.Optional(t.String({ maxLength: 256 }))
-      })
-    }
+        password: t.Optional(t.String({ maxLength: 256 })),
+      }),
+    },
   )
   .post("/signout", async ({ cookie, set }) => {
     cookie.session.remove();
     set.status = 204;
-    return;
   });

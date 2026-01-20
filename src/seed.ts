@@ -1,5 +1,5 @@
-import { prisma } from "./lib/prisma";
-import { hashPassword } from "./lib/auth";
+import { hashPassword } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 
 const run = async () => {
   const ips = ["127.0.0.1", "::1"];
@@ -10,12 +10,13 @@ const run = async () => {
     await prisma.iPWhitelist.upsert({
       where: { ip },
       update: { status: "ACTIVE", updated_by: "system" },
-      create: { ip, note: "seed", status: "ACTIVE", created_by: "system", updated_by: "system" }
+      create: { ip, note: "seed", status: "ACTIVE", created_by: "system", updated_by: "system" },
     });
   }
 
   const shouldCreateTestUser =
-    (process.env.SEED_CREATE_TEST_USER ?? "").toLowerCase() === "true" || process.env.SEED_CREATE_TEST_USER === "1";
+    (process.env.SEED_CREATE_TEST_USER ?? "").toLowerCase() === "true" ||
+    process.env.SEED_CREATE_TEST_USER === "1";
   if (!shouldCreateTestUser) return;
 
   const testUsername = "testingaccount";
@@ -23,16 +24,24 @@ const run = async () => {
   const testPassword = "helloworld26";
 
   const organization =
-    (await prisma.organization.findFirst({ where: { status: "ACTIVE" }, orderBy: { created_date: "asc" } })) ??
+    (await prisma.organization.findFirst({
+      where: { status: "ACTIVE" },
+      orderBy: { created_date: "asc" },
+    })) ??
     (await prisma.organization.create({
-      data: { display_name: "Workspace", status: "ACTIVE", created_by: "system", updated_by: "system" }
+      data: {
+        display_name: "Workspace",
+        status: "ACTIVE",
+        created_by: "system",
+        updated_by: "system",
+      },
     }));
 
   const passwordHash = await hashPassword(testPassword);
 
   const existing = await prisma.user.findFirst({
     where: { organization_id: organization.id, username: testUsername },
-    select: { id: true }
+    select: { id: true },
   });
 
   if (existing) {
@@ -44,8 +53,8 @@ const run = async () => {
         email_verified_at: new Date(),
         status: "ACTIVE",
         role: "SUPER",
-        updated_by: "system"
-      }
+        updated_by: "system",
+      },
     });
     return;
   }
@@ -60,8 +69,8 @@ const run = async () => {
       status: "ACTIVE",
       role: "SUPER",
       created_by: "system",
-      updated_by: "system"
-    }
+      updated_by: "system",
+    },
   });
 };
 

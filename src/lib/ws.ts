@@ -23,5 +23,5 @@ export const wsRegistry = {
         sockets.delete(ws);
       }
     }
-  }
+  },
 };
