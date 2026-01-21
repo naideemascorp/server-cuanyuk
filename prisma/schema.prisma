@@ -100,6 +100,8 @@ model Notification {
   title           String
   description     String
   publish_at      DateTime               @default(now())
+  recipient_organization_ids String[]    @default([])
+  recipient_roles            UserRole[]  @default([])
   recipients      NotificationRecipient[]
 
   @@index([organization_id, status, publish_at])

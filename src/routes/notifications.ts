@@ -51,17 +51,75 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
         const email = user?.email ?? "";
         const name = username || (email.includes("@") ? email.split("@")[0] : email) || "there";
         const userCreated = user?.created_date ?? new Date(0);
+        const orgId = user?.organization_id ?? "";
+        const org =
+          orgId && orgId.length > 10
+            ? await prisma.organization.findFirst({
+                where: { id: orgId },
+                select: { display_name: true },
+              })
+            : null;
+        const orgName = org?.display_name ?? "";
+        const hour = now.getHours();
+        const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+        const emailLocalPart = email.includes("@") ? email.split("@")[0] : email;
+        const emailDomain = email.includes("@") ? email.split("@")[1] : "";
+        const pad2 = (n: number) => String(n).padStart(2, "0");
+        const nowTime = `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}`;
+        const weekday = [
+          "Sunday",
+          "Monday",
+          "Tuesday",
+          "Wednesday",
+          "Thursday",
+          "Friday",
+          "Saturday",
+        ][now.getDay()];
+        const month = [
+          "January",
+          "February",
+          "March",
+          "April",
+          "May",
+          "June",
+          "July",
+          "August",
+          "September",
+          "October",
+          "November",
+          "December",
+        ][now.getMonth()];
         const vars: Record<string, string> = {
           name,
+          firstName: name,
+          displayName: name,
+          nameUpper: name.toUpperCase(),
           username,
+          usernameUpper: username.toUpperCase(),
           email,
+          emailLocalPart,
+          emailDomain,
           role: user?.role ?? "",
+          roleLower: (user?.role ?? "").toLowerCase(),
           organizationId: user?.organization_id ?? "",
+          organizationName: orgName,
           userId: user?.id ?? "",
+          greeting,
+          appName: "Cuan Yuk",
+          brandName: "Cuan Yuk",
+          productName: "Cuan Yuk",
           now: now.toISOString(),
+          nowTime,
+          weekday,
+          month,
           timestamp: now.toISOString(),
           date: now.toISOString().slice(0, 10),
           createdAt: userCreated.toISOString(),
+          year: String(now.getFullYear()),
+          nowEpochMs: String(now.getTime()),
+          nowHour: String(now.getHours()),
+          nowMinute: String(now.getMinutes()),
+          nowSecond: String(now.getSeconds()),
         };
 
         const welcomeTemplate = await prisma.notificationTemplate.findFirst({
@@ -69,14 +127,22 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           select: { title: true, description: true },
         });
 
+        const audienceOr = [
+          {
+            recipients: { none: {} },
+            recipient_organization_ids: { equals: [] as string[] },
+            recipient_roles: { equals: [] as Array<"USER" | "SUPER"> },
+          },
+          { recipients: { some: { user_id: authUser.userId } } },
+          ...(orgId ? [{ recipient_organization_ids: { has: orgId } }] : []),
+          ...(user?.role ? [{ recipient_roles: { has: user.role } }] : []),
+        ];
+
         const notifications = await prisma.notification.findMany({
           where: {
             status: "ACTIVE",
             publish_at: { lte: now },
-            OR: [
-              { recipients: { none: {} } },
-              { recipients: { some: { user_id: authUser.userId } } },
-            ],
+            OR: audienceOr,
           },
           orderBy: [{ publish_at: "desc" }],
           take: 10,
@@ -120,10 +186,7 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           where: {
             status: "ACTIVE",
             publish_at: { lte: now, gt: readAt },
-            OR: [
-              { recipients: { none: {} } },
-              { recipients: { some: { user_id: authUser.userId } } },
-            ],
+            OR: audienceOr,
           },
         });
         const unreadWelcome = includeWelcome && userCreated.getTime() > readAt.getTime() ? 1 : 0;
@@ -133,10 +196,7 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           where: {
             status: "ACTIVE",
             publish_at: { gt: now },
-            OR: [
-              { recipients: { none: {} } },
-              { recipients: { some: { user_id: authUser.userId } } },
-            ],
+            OR: audienceOr,
           },
           orderBy: [{ publish_at: "asc" }],
           select: { publish_at: true },

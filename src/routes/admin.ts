@@ -97,6 +97,8 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           created_date: Date;
           updated_date: Date;
           recipients: Array<{ user_id: string }>;
+          recipient_organization_ids: string[];
+          recipient_roles: string[];
         }>;
         return {
           entries: rows.map((e) => ({
@@ -109,6 +111,8 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             createdDate: e.created_date,
             updatedDate: e.updated_date,
             recipientUserIds: (e.recipients ?? []).map((r) => r.user_id),
+            recipientOrganizationIds: e.recipient_organization_ids ?? [],
+            recipientRoles: e.recipient_roles ?? [],
           })),
         };
       })
@@ -126,6 +130,8 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           const status = body.status;
           const publishAt = new Date(body.publishAt);
           const rawRecipientIds = body.recipientUserIds ?? [];
+          const rawRecipientOrgIds = body.recipientOrganizationIds ?? [];
+          const rawRecipientRoles = body.recipientRoles ?? [];
           if (!Number.isFinite(publishAt.getTime())) {
             set.status = 400;
             return { ok: false, code: "INVALID_PUBLISH_AT" };
@@ -146,6 +152,8 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                   importance,
                   status,
                   publish_at: publishAt,
+                  recipient_organization_ids: rawRecipientOrgIds,
+                  recipient_roles: rawRecipientRoles,
                   updated_by: authUser.userId,
                 },
               });
@@ -198,6 +206,8 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                 importance,
                 status,
                 publish_at: publishAt,
+                recipient_organization_ids: rawRecipientOrgIds,
+                recipient_roles: rawRecipientRoles,
                 created_by: authUser.userId,
                 updated_by: authUser.userId,
               },
@@ -250,6 +260,10 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
             publishAt: t.String({ minLength: 10, maxLength: 40 }),
             recipientUserIds: t.Optional(t.Array(t.String({ minLength: 10, maxLength: 60 }))),
+            recipientOrganizationIds: t.Optional(
+              t.Array(t.String({ minLength: 10, maxLength: 60 })),
+            ),
+            recipientRoles: t.Optional(t.Array(t.Union([t.Literal("USER"), t.Literal("SUPER")]))),
           }),
         },
       )
@@ -259,9 +273,9 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           where: { key: "WELCOME" },
           create: {
             key: "WELCOME",
-            title: "Welcome, {{name}}!",
+            title: "Welcome in, {{name}}",
             description:
-              "Hi {{name}} — welcome to Cuan Yuk! Your account was created on {{createdAt}}.",
+              "Hey {{name}} — welcome to Cuan Yuk. You’re officially in. Tap around, explore the dashboard, and start stacking wins today.",
             status: "ACTIVE",
             created_by: authUser.userId,
             updated_by: authUser.userId,
@@ -321,6 +335,20 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           }),
         },
       )
+      .get("/organizations", async (ctx) => {
+        const orgs = await prisma.organization.findMany({
+          orderBy: [{ display_name: "asc" }],
+          take: 500,
+          select: { id: true, display_name: true, status: true },
+        });
+        return {
+          organizations: orgs.map((o) => ({
+            id: o.id,
+            displayName: o.display_name,
+            status: o.status,
+          })),
+        };
+      })
       .get("/users", async (ctx) => {
         const users = await prisma.user.findMany({
           orderBy: [{ updated_date: "desc" }],
