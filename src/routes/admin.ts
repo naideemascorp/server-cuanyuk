@@ -85,6 +85,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
         const entries = await prisma.notification.findMany({
           orderBy: [{ publish_at: "desc" }],
           take: 200,
+          include: { recipients: { select: { user_id: true } } },
         });
         const rows = entries as Array<{
           id: string;
@@ -95,6 +96,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           status: string;
           created_date: Date;
           updated_date: Date;
+          recipients: Array<{ user_id: string }>;
         }>;
         return {
           entries: rows.map((e) => ({
@@ -106,6 +108,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             status: e.status,
             createdDate: e.created_date,
             updatedDate: e.updated_date,
+            recipientUserIds: (e.recipients ?? []).map((r) => r.user_id),
           })),
         };
       })
@@ -122,6 +125,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           const importance = body.importance;
           const status = body.status;
           const publishAt = new Date(body.publishAt);
+          const rawRecipientIds = body.recipientUserIds ?? [];
           if (!Number.isFinite(publishAt.getTime())) {
             set.status = 400;
             return { ok: false, code: "INVALID_PUBLISH_AT" };
@@ -145,6 +149,21 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                   updated_by: authUser.userId,
                 },
               });
+
+              const validUsers = rawRecipientIds.length
+                ? await tx.user.findMany({
+                    where: { id: { in: rawRecipientIds } },
+                    select: { id: true },
+                  })
+                : [];
+              await tx.notificationRecipient.deleteMany({ where: { notification_id: id } });
+              if (validUsers.length) {
+                await tx.notificationRecipient.createMany({
+                  data: validUsers.map((u) => ({ notification_id: id, user_id: u.id })),
+                  skipDuplicates: true,
+                });
+              }
+
               if (status === "ACTIVE") {
                 const active = await tx.notification.findMany({
                   where: { status: "ACTIVE" },
@@ -183,6 +202,20 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                 updated_by: authUser.userId,
               },
             });
+
+            const validUsers = rawRecipientIds.length
+              ? await tx.user.findMany({
+                  where: { id: { in: rawRecipientIds } },
+                  select: { id: true },
+                })
+              : [];
+            if (validUsers.length) {
+              await tx.notificationRecipient.createMany({
+                data: validUsers.map((u) => ({ notification_id: saved.id, user_id: u.id })),
+                skipDuplicates: true,
+              });
+            }
+
             if (status === "ACTIVE") {
               const active = await tx.notification.findMany({
                 where: { status: "ACTIVE" },
@@ -216,6 +249,75 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             ]),
             status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
             publishAt: t.String({ minLength: 10, maxLength: 40 }),
+            recipientUserIds: t.Optional(t.Array(t.String({ minLength: 10, maxLength: 60 }))),
+          }),
+        },
+      )
+      .get("/notification-templates/welcome", async (ctx) => {
+        const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+        const entry = await prisma.notificationTemplate.upsert({
+          where: { key: "WELCOME" },
+          create: {
+            key: "WELCOME",
+            title: "Welcome, {{name}}!",
+            description:
+              "Hi {{name}} — welcome to Cuan Yuk! Your account was created on {{createdAt}}.",
+            status: "ACTIVE",
+            created_by: authUser.userId,
+            updated_by: authUser.userId,
+          },
+          update: {},
+          select: { key: true, status: true, title: true, description: true, updated_date: true },
+        });
+        return {
+          template: {
+            key: entry.key,
+            status: entry.status,
+            title: entry.title,
+            description: entry.description,
+            updatedDate: entry.updated_date,
+          },
+        };
+      })
+      .post(
+        "/notification-templates/welcome",
+        async (ctx) => {
+          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+          const body = ctx.body;
+          const updated = await prisma.notificationTemplate.upsert({
+            where: { key: "WELCOME" },
+            create: {
+              key: "WELCOME",
+              title: body.title.trim(),
+              description: body.description.trim(),
+              status: body.status,
+              created_by: authUser.userId,
+              updated_by: authUser.userId,
+            },
+            update: {
+              title: body.title.trim(),
+              description: body.description.trim(),
+              status: body.status,
+              updated_by: authUser.userId,
+            },
+            select: { key: true, status: true, title: true, description: true, updated_date: true },
+          });
+          return {
+            ok: true,
+            template: {
+              key: updated.key,
+              status: updated.status,
+              title: updated.title,
+              description: updated.description,
+              updatedDate: updated.updated_date,
+            },
+          };
+        },
+        {
+          body: t.Object({
+            title: t.String({ minLength: 2, maxLength: 200 }),
+            description: t.String({ minLength: 2, maxLength: 1000 }),
+            status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
           }),
         },
       )

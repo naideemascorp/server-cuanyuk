@@ -31,6 +31,10 @@ enum NotificationImportance {
   CRITICAL
 }
 
+enum NotificationTemplateKey {
+  WELCOME
+}
+
 model Organization {
   id           String       @id @default(uuid())
   created_date DateTime     @default(now())
@@ -74,6 +78,7 @@ model User {
   emailTokens       EmailVerificationToken[]
   passwordResetTokens PasswordResetToken[]
   telegramUsers     TelegramUser[]
+  notificationRecipients NotificationRecipient[]
 
   @@unique([organization_id, username])
   @@unique([organization_id, email])
@@ -95,8 +100,40 @@ model Notification {
   title           String
   description     String
   publish_at      DateTime               @default(now())
+  recipients      NotificationRecipient[]
 
   @@index([organization_id, status, publish_at])
+}
+
+model NotificationRecipient {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+
+  notification_id String
+  notification    Notification @relation(fields: [notification_id], references: [id], onDelete: Cascade)
+
+  user_id         String
+  user            User         @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@unique([notification_id, user_id])
+  @@index([user_id])
+  @@index([notification_id])
+}
+
+model NotificationTemplate {
+  id           String                  @id @default(uuid())
+  created_date DateTime                @default(now())
+  updated_date DateTime                @updatedAt
+  status       RecordStatus            @default(ACTIVE)
+  created_by   String?
+  updated_by   String?
+
+  key          NotificationTemplateKey @unique
+  title        String
+  description  String
+
+  @@index([status, updated_date])
 }
 
 model Session {
