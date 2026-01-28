@@ -81,6 +81,62 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           }),
         },
       )
+      .get("/devices", async () => {
+        const entries = await prisma.deviceWhitelist.findMany({
+          orderBy: [{ updated_date: "desc" }],
+          take: 200,
+        });
+        const rows = entries as Array<{
+          id: string;
+          device_id: string;
+          note: string | null;
+          status: string;
+          created_date: Date;
+          updated_date: Date;
+        }>;
+        return {
+          entries: rows.map((e) => ({
+            id: e.id,
+            ip: e.device_id,
+            note: e.note,
+            status: e.status,
+            createdDate: e.created_date,
+            updatedDate: e.updated_date,
+          })),
+        };
+      })
+      .post(
+        "/devices",
+        async (ctx) => {
+          const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
+          const body = ctx.body;
+          const set = ctx.set;
+          const deviceId = body.ip.trim();
+          const note = body.note?.trim() || null;
+          const status = body.status;
+
+          const saved = await prisma.deviceWhitelist.upsert({
+            where: { device_id: deviceId },
+            create: {
+              device_id: deviceId,
+              note,
+              status,
+              created_by: authUser.userId,
+              updated_by: authUser.userId,
+            },
+            update: { note, status, updated_by: authUser.userId },
+          });
+          set.status = 201;
+          return { entry: saved };
+        },
+        {
+          body: t.Object({
+            ip: t.String({ minLength: 8, maxLength: 120 }),
+            status: t.Union([t.Literal("ACTIVE"), t.Literal("INACTIVE")]),
+            note: t.Optional(t.String({ maxLength: 200 })),
+          }),
+        },
+      )
       .get("/notifications", async (ctx) => {
         const entries = await prisma.notification.findMany({
           orderBy: [{ publish_at: "desc" }],

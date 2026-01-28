@@ -1,6 +1,7 @@
 import { unlink } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { config } from "@/config";
+import { getDeviceIdFromContext } from "@/lib/device";
 import { getClientIpFromContext } from "@/lib/ip";
 import { prisma } from "@/lib/prisma";
 import { startExpirationSweep } from "@/lib/scheduler";
@@ -72,11 +73,20 @@ const app = new Elysia()
         return { ok: false };
       }
 
-      const ip = getClientIpFromContext(ctx);
-      const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
-      if (ipRow?.status === "INACTIVE") {
-        ctx.set.status = 404;
-        return { ok: false };
+      const deviceId = getDeviceIdFromContext(ctx);
+      if (deviceId) {
+        const deviceRow = await prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId } });
+        if (deviceRow?.status === "INACTIVE") {
+          ctx.set.status = 404;
+          return { ok: false };
+        }
+      } else {
+        const ip = getClientIpFromContext(ctx);
+        const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
+        if (ipRow?.status === "INACTIVE") {
+          ctx.set.status = 404;
+          return { ok: false };
+        }
       }
 
       const org = await prisma.organization.findFirst({

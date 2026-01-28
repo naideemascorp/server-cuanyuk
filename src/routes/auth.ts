@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { config } from "@/config";
 import { hashPassword, verifyPassword } from "@/lib/auth";
-import { getClientIpFromContext } from "@/lib/ip";
+import { getDeviceIdFromContext } from "@/lib/device";
 import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
 import { prisma } from "@/lib/prisma";
 import { Elysia, t } from "elysia";
@@ -19,26 +19,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     const accept = ctx.request.headers.get("accept") ?? "";
     const wantsHtml = accept.includes("text/html");
 
-    const ip = getClientIpFromContext(ctx);
-    try {
-      const whitelisted = await withTimeout(
-        prisma.iPWhitelist.findFirst({ where: { ip, status: "ACTIVE" } }),
-        1200,
-      );
-      const allowed = Boolean(whitelisted);
-
-      if (!wantsHtml) return { allowed, ip };
-      if (!allowed) {
-        return new Response("Not Found", {
-          status: 404,
-          headers: {
-            "content-type": "text/plain; charset=utf-8",
-            "cache-control": "no-store",
-          },
-        });
-      }
-
-      const html = `<!doctype html>
+    const html = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
@@ -75,9 +56,9 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         <div class="inner">
           <div>
             <h1>Sign Up</h1>
-            <div class="sub">This is the backend sign-up page. IP allow-list is enforced.</div>
+            <div class="sub">This is the backend sign-up page. Device allow-list is enforced.</div>
           </div>
-          <div class="pill">Client IP detected: <span id="ip">${ip}</span> • Signup allowed: <span id="allowed">${allowed ? "YES" : "NO"}</span></div>
+          <div class="pill">Device ID: <span id="device">—</span> • Signup allowed: <span id="allowed">—</span></div>
           <div class="grid">
             <div class="card" style="grid-column: span 7;">
               <div class="cardInner">
@@ -95,7 +76,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
                     <input id="password" name="password" type="password" autocomplete="new-password" minlength="8" maxlength="256" required />
                   </div>
                   <div style="grid-column: span 12; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap;">
-                    <button class="primary" type="submit" ${allowed ? "" : "disabled"}>Create Account</button>
+                    <button id="submitBtn" class="primary" type="submit" disabled>Create Account</button>
                     <a class="pill" href="/" style="text-decoration: none;">Back</a>
                   </div>
                   <div id="msg" class="msg" style="grid-column: span 12;"></div>
@@ -115,83 +96,119 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       </div>
     </div>
     <script>
-      const allowed = ${allowed ? "true" : "false"};
+      const makeUuidV4 = () => {
+        const cryptoObj = globalThis.crypto;
+        if (cryptoObj?.randomUUID) return cryptoObj.randomUUID();
+        const bytes = new Uint8Array(16);
+        cryptoObj.getRandomValues(bytes);
+        bytes[6] = (bytes[6] & 0x0f) | 0x40;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+        return \`\${hex.slice(0, 8)}-\${hex.slice(8, 12)}-\${hex.slice(12, 16)}-\${hex.slice(16, 20)}-\${hex.slice(20)}\`;
+      };
+
+      const getOrCreateDeviceId = () => {
+        try {
+          const existing = localStorage.getItem("device_id");
+          if (existing && existing.trim()) return existing.trim();
+          const created = makeUuidV4();
+          localStorage.setItem("device_id", created);
+          return created;
+        } catch {
+          return null;
+        }
+      };
+
+      const deviceId = getOrCreateDeviceId();
+      const deviceEl = document.getElementById("device");
+      const allowedEl = document.getElementById("allowed");
+      const submitBtn = document.getElementById("submitBtn");
       const msg = document.getElementById("msg");
       const form = document.getElementById("form");
-      const setMsg = (t, cls) => { msg.textContent = t; msg.className = "msg " + (cls || ""); };
-      if (!allowed) setMsg("Your IP is not whitelisted. Ask an admin to allow-list this IP before signing up.", "err");
+
+      const setAllowedUi = (allowed) => {
+        allowedEl.textContent = allowed ? "YES" : "NO";
+        submitBtn.disabled = !allowed;
+        if (!allowed)
+          msg.textContent =
+            "This device is not allow-listed. Ask an admin to allow-list this device ID before signing up.";
+        if (allowed) msg.textContent = "";
+      };
+
+      if (deviceId) deviceEl.textContent = deviceId;
+      if (!deviceId) {
+        allowedEl.textContent = "NO";
+        msg.textContent = "Unable to generate a device ID (storage blocked).";
+      } else {
+        fetch("/auth/signup-allowed", {
+          headers: { accept: "application/json", "x-device-id": deviceId },
+        })
+          .then((r) => r.json())
+          .then((data) => setAllowedUi(Boolean(data && data.allowed)))
+          .catch(() => {
+            allowedEl.textContent = "NO";
+            msg.textContent = "Failed to reach server.";
+          });
+      }
+
       form.addEventListener("submit", async (e) => {
         e.preventDefault();
-        if (!allowed) return;
-        setMsg("Sending…");
+        if (!deviceId) return;
+        if (submitBtn.disabled) return;
+        msg.textContent = "Sending…";
         const payload = {
           username: document.getElementById("username").value,
           email: document.getElementById("email").value,
-          password: document.getElementById("password").value
+          password: document.getElementById("password").value,
         };
         const res = await fetch("/auth/signup", {
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(payload)
+          headers: { "content-type": "application/json", "x-device-id": deviceId },
+          body: JSON.stringify(payload),
         });
         const text = await res.text();
         let data = null;
-        try { data = text ? JSON.parse(text) : null; } catch {}
+        try {
+          data = text ? JSON.parse(text) : null;
+        } catch {}
         if (!res.ok || !data || data.ok !== true) {
-          const code = (data && data.code) ? data.code : ("HTTP_" + res.status);
-          setMsg("Sign up failed: " + code, "err");
+          const code = data && data.code ? data.code : "HTTP_" + res.status;
+          msg.textContent = "Sign up failed: " + code;
           return;
         }
-        setMsg("Created. Check your email for the verification link.", "ok");
+        msg.textContent = "Created. Check your email for the verification link.";
         form.reset();
       });
     </script>
   </body>
 </html>`;
 
+    if (wantsHtml) {
       return new Response(html, {
         headers: {
           "content-type": "text/html; charset=utf-8",
           "cache-control": "no-store",
         },
       });
+    }
+
+    const deviceId = getDeviceIdFromContext(ctx);
+    try {
+      const hasAnyUser = await withTimeout(
+        prisma.user.findFirst({ select: { id: true } }),
+        1200,
+      );
+      const bootstrap = !hasAnyUser;
+      if (bootstrap) return { allowed: true, deviceId };
+      if (!deviceId) return { allowed: false, deviceId: null };
+
+      const whitelisted = await withTimeout(
+        prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId, status: "ACTIVE" } }),
+        1200,
+      );
+      return { allowed: Boolean(whitelisted), deviceId };
     } catch {
-      if (!wantsHtml) return { allowed: false, ok: false, code: "DB_NOT_READY" };
-
-      const html = `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sign Up</title>
-    <style>
-      :root { color-scheme: dark; }
-      body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: #090a0f; color: rgba(250,250,255,.92); }
-      .shell { min-height: 100vh; display: grid; place-items: center; padding: 28px 18px; }
-      .card { width: min(760px, 100%); border: 1px solid rgba(255,255,255,.14); border-radius: 18px; padding: 18px; background: rgba(10,12,20,.7); }
-      h1 { margin: 0 0 10px 0; font-size: 28px; letter-spacing: -0.02em; }
-      .sub { color: rgba(250,250,255,.68); line-height: 1.5; }
-      code { color: rgba(124,255,214,.92); }
-    </style>
-  </head>
-  <body>
-    <div class="shell">
-      <div class="card">
-        <h1>Backend Sign Up</h1>
-        <div class="sub">Database is not ready (tables/migrations missing or DB unreachable). Apply migrations, then reload this page.</div>
-        <div class="sub" style="margin-top: 10px;">If you are using Prisma migrations, run: <code>bunx prisma migrate deploy</code> in the server folder.</div>
-      </div>
-    </div>
-  </body>
-</html>`;
-
-      return new Response(html, {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store",
-        },
-        status: 503,
-      });
+      return { allowed: false, ok: false, code: "DB_NOT_READY" };
     }
   })
   .post(
@@ -199,24 +216,35 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     async (ctx) => {
       const body = ctx.body;
       const set = ctx.set;
-      const ip = getClientIpFromContext(ctx);
+      const deviceId = getDeviceIdFromContext(ctx);
+      if (!deviceId) {
+        set.status = 403;
+        return { ok: false, code: "DEVICE_ID_REQUIRED" };
+      }
 
       let whitelisted: { organization_id: string | null } | null = null;
+      let bootstrap = false;
       try {
-        whitelisted = await withTimeout(
-          prisma.iPWhitelist.findFirst({
-            where: { ip, status: "ACTIVE" },
-            select: { organization_id: true },
-          }),
-          1200,
-        );
+        const hasAnyUser = await withTimeout(prisma.user.findFirst({ select: { id: true } }), 1200);
+        bootstrap = !hasAnyUser;
+        if (!bootstrap) {
+          whitelisted = await withTimeout(
+            prisma.deviceWhitelist.findFirst({
+              where: { device_id: deviceId, status: "ACTIVE" },
+              select: { organization_id: true },
+            }),
+            1200,
+          );
+        } else {
+          whitelisted = { organization_id: null };
+        }
       } catch {
         set.status = 503;
         return { ok: false, code: "DB_NOT_READY" };
       }
       if (!whitelisted) {
         set.status = 403;
-        return { ok: false, code: "SIGNUP_IP_NOT_ALLOWED" };
+        return { ok: false, code: "SIGNUP_DEVICE_NOT_ALLOWED" };
       }
 
       const existingOrg = whitelisted.organization_id
@@ -234,6 +262,25 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
             updated_by: "system",
           },
         }));
+
+      if (bootstrap) {
+        await prisma.deviceWhitelist.upsert({
+          where: { device_id: deviceId },
+          create: {
+            device_id: deviceId,
+            status: "ACTIVE",
+            organization_id: organization.id,
+            note: "Bootstrap device",
+            created_by: "system",
+            updated_by: "system",
+          },
+          update: {
+            status: "ACTIVE",
+            organization_id: organization.id,
+            updated_by: "system",
+          },
+        });
+      }
 
       const username = body.username.trim();
       const email = body.email.trim().toLowerCase();
