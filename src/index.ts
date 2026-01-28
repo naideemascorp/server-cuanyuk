@@ -75,7 +75,9 @@ const app = new Elysia()
 
       const deviceId = getDeviceIdFromContext(ctx);
       if (deviceId) {
-        const deviceRow = await prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId } });
+        const deviceRow = await prisma.deviceWhitelist.findFirst({
+          where: { device_id: deviceId },
+        });
         if (deviceRow?.status === "INACTIVE") {
           ctx.set.status = 404;
           return { ok: false };

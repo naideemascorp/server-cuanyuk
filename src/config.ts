@@ -26,7 +26,7 @@ const toggleWww = (origin: string): string | null => {
   return `${u.protocol}//${nextHost}`;
 };
 
-const computeCorsOrigins = (appPublicBaseUrl: string): string[] => {
+const computeCorsOrigins = (appPublicBaseUrl: string): Array<string | RegExp> => {
   const base = normalizeOrigin(appPublicBaseUrl);
   const rawExtra = (process.env.CORS_ORIGINS ?? "")
     .split(",")
@@ -42,7 +42,13 @@ const computeCorsOrigins = (appPublicBaseUrl: string): string[] => {
     if (alt) set.add(alt);
   }
   for (const o of rawExtra) set.add(o);
-  return Array.from(set);
+  const tauriAndLocalOrigins: RegExp[] = [
+    /^tauri:\/\/localhost$/i,
+    /^https?:\/\/tauri\.localhost(?::\d+)?$/i,
+    /^https?:\/\/localhost(?::\d+)?$/i,
+    /^https?:\/\/127\.0\.0\.1(?::\d+)?$/i,
+  ];
+  return [...Array.from(set), ...tauriAndLocalOrigins];
 };
 
 const computeCookiePolicy = (appPublicBaseUrl: string, serverPublicBaseUrl: string) => {

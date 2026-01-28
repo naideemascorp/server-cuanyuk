@@ -194,10 +194,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
     const deviceId = getDeviceIdFromContext(ctx);
     try {
-      const hasAnyUser = await withTimeout(
-        prisma.user.findFirst({ select: { id: true } }),
-        1200,
-      );
+      const hasAnyUser = await withTimeout(prisma.user.findFirst({ select: { id: true } }), 1200);
       const bootstrap = !hasAnyUser;
       if (bootstrap) return { allowed: true, deviceId };
       if (!deviceId) return { allowed: false, deviceId: null };
