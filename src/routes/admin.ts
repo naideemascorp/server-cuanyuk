@@ -1,8 +1,9 @@
 import { prisma } from "@/lib/prisma";
 import type { AuthUser } from "@/lib/types";
+import type { Prisma } from "@prisma/client";
 import { Elysia, t } from "elysia";
 
-export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
+export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
   {
     beforeHandle: async (ctx) => {
       const authUser = (ctx as unknown as { authUser: AuthUser | null }).authUser;
@@ -197,7 +198,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           }
 
           if (isWelcome) {
-            const saved = await prisma.$transaction(async (tx) => {
+            const saved = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
               const existingWelcome = await tx.notification.findFirst({
                 where: { organization_id: authUser.organizationId, is_welcome: true },
                 select: { id: true },
@@ -242,7 +243,10 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
               await tx.notificationRecipient.deleteMany({ where: { notification_id: row.id } });
               if (validUsers.length) {
                 await tx.notificationRecipient.createMany({
-                  data: validUsers.map((u) => ({ notification_id: row.id, user_id: u.id })),
+                  data: validUsers.map((u: { id: string }) => ({
+                    notification_id: row.id,
+                    user_id: u.id,
+                  })),
                   skipDuplicates: true,
                 });
               }
@@ -274,7 +278,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           }
 
           if (id) {
-            const updated = await prisma.$transaction(async (tx) => {
+            const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
               const existing = await tx.notification.findFirst({
                 where: { id },
                 select: { id: true },
@@ -304,7 +308,10 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
               await tx.notificationRecipient.deleteMany({ where: { notification_id: id } });
               if (validUsers.length) {
                 await tx.notificationRecipient.createMany({
-                  data: validUsers.map((u) => ({ notification_id: id, user_id: u.id })),
+                  data: validUsers.map((u: { id: string }) => ({
+                    notification_id: id,
+                    user_id: u.id,
+                  })),
                   skipDuplicates: true,
                 });
               }
@@ -338,7 +345,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             return { entry: updated };
           }
 
-          const created = await prisma.$transaction(async (tx) => {
+          const created = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
             const saved = await tx.notification.create({
               data: {
                 organization_id: authUser.organizationId,
@@ -363,7 +370,10 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
               : [];
             if (validUsers.length) {
               await tx.notificationRecipient.createMany({
-                data: validUsers.map((u) => ({ notification_id: saved.id, user_id: u.id })),
+                data: validUsers.map((u: { id: string }) => ({
+                  notification_id: saved.id,
+                  user_id: u.id,
+                })),
                 skipDuplicates: true,
               });
             }
@@ -519,7 +529,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           select: { id: true, display_name: true, status: true },
         });
         return {
-          organizations: orgs.map((o) => ({
+          organizations: orgs.map((o: { id: string; display_name: string; status: string }) => ({
             id: o.id,
             displayName: o.display_name,
             status: o.status,

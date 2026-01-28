@@ -7,12 +7,20 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
     const [cats, merchants] = await Promise.all([
       prisma.category.findMany({
-        where: { organization_id: authUser.organizationId, status: "ACTIVE" },
+        where: {
+          organization_id: authUser.organizationId,
+          status: "ACTIVE",
+          NOT: { name: "Cash In/Out" },
+        },
         orderBy: [{ name: "asc" }],
         select: { id: true, name: true },
       }),
       prisma.merchant.findMany({
-        where: { organization_id: authUser.organizationId, status: "ACTIVE" },
+        where: {
+          organization_id: authUser.organizationId,
+          status: "ACTIVE",
+          NOT: { category: "Cash In/Out" },
+        },
         select: { category: true },
       }),
     ]);
@@ -22,6 +30,7 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
     for (const m of merchants) {
       const n = (m.category || "").trim();
       if (!n) continue;
+      if (n === "Cash In/Out") continue;
       if (!merged.has(n)) merged.set(n, { id: null, name: n });
     }
 

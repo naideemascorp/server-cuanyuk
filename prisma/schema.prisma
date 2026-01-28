@@ -19,6 +19,11 @@ enum PaymentKind {
   QRIS
 }
 
+enum CashType {
+  CASH_IN
+  CASH_OUT
+}
+
 enum UserRole {
   USER
   SUPER
@@ -52,6 +57,8 @@ model Organization {
   ipWhitelist  IPWhitelist[]
   deviceWhitelist DeviceWhitelist[]
   notifications Notification[]
+  partners     Partner[]
+  cashTransactions CashTransaction[]
 
   @@index([status, created_date])
 }
@@ -263,9 +270,61 @@ model Merchant {
   sort_order      Int          @default(0)
 
   paymentItems    PaymentItem[]
+  cashTransactions CashTransaction[]
 
   @@unique([organization_id, name])
   @@index([organization_id, category, status])
+}
+
+model Partner {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(ACTIVE)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  name            String
+
+  cashTransactions CashTransaction[]
+
+  @@unique([organization_id, name])
+  @@index([organization_id, status, name])
+}
+
+model CashTransaction {
+  id              String       @id @default(uuid())
+  created_date    DateTime     @default(now())
+  updated_date    DateTime     @updatedAt
+  status          RecordStatus @default(PENDING)
+  created_by      String?
+  updated_by      String?
+
+  organization_id String
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  cash_type       CashType
+  transaction_date DateTime
+  order_number    String
+  total_amount    Int          @default(0)
+  my_fee_bps      Int          @default(0)
+  customer_fee_bps Int         @default(0)
+  merchant_fee_bps Int         @default(0)
+
+  merchant_id     String
+  merchant        Merchant     @relation(fields: [merchant_id], references: [id], onDelete: Restrict)
+
+  partner_id      String
+  partner         Partner      @relation(fields: [partner_id], references: [id], onDelete: Restrict)
+
+  @@index([organization_id, status, transaction_date])
+  @@index([organization_id, cash_type, transaction_date])
+  @@unique([organization_id, order_number])
+  @@index([merchant_id])
+  @@index([partner_id])
 }
 
 model PaymentItem {

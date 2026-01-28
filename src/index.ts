@@ -13,6 +13,7 @@ import type { AuthUser } from "@/lib/types";
 import { wsRegistry } from "@/lib/ws";
 import { adminRoutes } from "@/routes/admin";
 import { authRoutes } from "@/routes/auth";
+import { cashRoutes } from "@/routes/cash";
 import { categoryRoutes } from "@/routes/categories";
 import { merchantRoutes } from "@/routes/merchants";
 import { notificationRoutes } from "@/routes/notifications";
@@ -85,7 +86,8 @@ const app = new Elysia()
   .mapResponse(({ response, set }) => {
     if (response instanceof Response) return response;
     const statusNumber = typeof set.status === "number" ? set.status : Number(set.status ?? 200);
-    if (Number.isFinite(statusNumber) && statusNumber === 204) return new Response(null, { status: 204 });
+    if (Number.isFinite(statusNumber) && statusNumber === 204)
+      return new Response(null, { status: 204 });
     if (typeof response === "string") {
       return new Response(response, {
         status: Number.isFinite(statusNumber) ? statusNumber : 200,
@@ -100,10 +102,15 @@ const app = new Elysia()
           const { ok: _ok, ...rest } = rec;
           return jsonResponse(apiOk(Object.keys(rest).length ? rest : undefined), set);
         }
-        const code = typeof rec.code === "string" ? rec.code : "REQUEST_FAILED";
-        const existingStatus = typeof set.status === "number" ? set.status : Number(set.status ?? 0);
-        set.status = Number.isFinite(existingStatus) && existingStatus >= 400 ? existingStatus : 400;
-        return jsonResponse(failBug(code, "Request rejected.", "Validate inputs and retry."), set);
+        const { ok: _ok, code: originalCode, ...rest } = rec;
+        const code = typeof originalCode === "string" ? originalCode : "REQUEST_FAILED";
+        const existingStatus =
+          typeof set.status === "number" ? set.status : Number(set.status ?? 0);
+        set.status =
+          Number.isFinite(existingStatus) && existingStatus >= 400 ? existingStatus : 400;
+        const failure = failBug(code, "Request rejected.", "Validate inputs and retry.");
+        const data = Object.keys(rest).length ? rest : undefined;
+        return jsonResponse(data ? { ...failure, data } : failure, set);
       }
     }
     return jsonResponse(apiOk(typeof response === "undefined" ? undefined : response), set);
@@ -245,13 +252,19 @@ const app = new Elysia()
     },
     { params: t.Object({ token: t.String({ minLength: 10 }) }) },
   )
-  .get("/auth/me", async ({ authUser }) => {
-    if (!authUser) return { ok: false };
+  .get("/auth/me", async ({ authUser, set }) => {
+    if (!authUser) {
+      set.status = 401;
+      return { ok: false, code: "UNAUTHORIZED" };
+    }
     const user = await prisma.user.findFirst({
       where: { id: authUser.userId, organization_id: authUser.organizationId, status: "ACTIVE" },
       select: { id: true, username: true, email: true, organization_id: true, role: true },
     });
-    if (!user) return { ok: false };
+    if (!user) {
+      set.status = 401;
+      return { ok: false, code: "UNAUTHORIZED" };
+    }
     const shareToken = makeShareToken(user.organization_id);
     return {
       ok: true,
@@ -280,7 +293,8 @@ const app = new Elysia()
         .use(adminRoutes)
         .use(categoryRoutes)
         .use(merchantRoutes)
-        .use(paymentRoutes),
+        .use(paymentRoutes)
+        .use(cashRoutes),
   )
   .use(authRoutes)
   .get("/health", () => ({ ok: true }))
