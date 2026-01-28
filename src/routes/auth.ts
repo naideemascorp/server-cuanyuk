@@ -86,7 +86,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
             <div class="card" style="grid-column: span 5;">
               <div class="cardInner">
                 <div style="font-weight: 650; letter-spacing: -0.01em;">Next Steps</div>
-                <div class="sub">After signing up, check your inbox for the verification link. Login is blocked until verified.</div>
+                <div class="sub">After signing up, check your inbox for the verification link. Sign in is blocked until verified.</div>
                 <div style="height: 1px; background: rgba(255,255,255,.12);"></div>
                 <div class="sub">Recommended UX is on the frontend at <b>http://localhost:3000/sign-up</b>.</div>
               </div>

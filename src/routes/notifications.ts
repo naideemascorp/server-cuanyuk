@@ -121,11 +121,37 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           nowMinute: String(now.getMinutes()),
           nowSecond: String(now.getSeconds()),
         };
-
-        const welcomeTemplate = await prisma.notificationTemplate.findFirst({
-          where: { key: "WELCOME", status: "ACTIVE" },
-          select: { title: true, description: true },
-        });
+        if (orgId && orgId.length > 10) {
+          const hasWelcome = await prisma.notification.findFirst({
+            where: { organization_id: orgId, is_welcome: true },
+            select: { id: true },
+          });
+          if (!hasWelcome) {
+            const welcomeTemplate = await prisma.notificationTemplate.findFirst({
+              where: { key: "WELCOME", status: "ACTIVE" },
+              select: { title: true, description: true },
+            });
+            if (welcomeTemplate) {
+              try {
+                await prisma.notification.create({
+                  data: {
+                    organization_id: orgId,
+                    title: welcomeTemplate.title,
+                    description: welcomeTemplate.description,
+                    importance: "LOW",
+                    status: "ACTIVE",
+                    publish_at: now,
+                    is_welcome: true,
+                    recipient_organization_ids: [],
+                    recipient_roles: [],
+                    created_by: "system",
+                    updated_by: "system",
+                  },
+                });
+              } catch {}
+            }
+          }
+        }
 
         const audienceOr = [
           {
@@ -149,13 +175,6 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           select: { id: true, title: true, description: true, importance: true, publish_at: true },
         });
 
-        const welcomeExpiresAt = new Date(userCreated.getTime() + 31 * 24 * 60 * 60 * 1000);
-        const includeWelcome =
-          Boolean(welcomeTemplate) &&
-          Number.isFinite(userCreated.getTime()) &&
-          userCreated.getTime() > 0 &&
-          now.getTime() < welcomeExpiresAt.getTime();
-
         const renderedFromDb: RenderedNotification[] = notifications.map((n) => ({
           id: n.id,
           title: renderTemplate(n.title, vars),
@@ -163,21 +182,7 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
           importance: n.importance as unknown as NotificationImportance,
           publish_at: n.publish_at,
         }));
-
-        const welcome: RenderedNotification[] =
-          includeWelcome && welcomeTemplate
-            ? [
-                {
-                  id: `WELCOME:${user?.id ?? "USER"}`,
-                  title: renderTemplate(welcomeTemplate.title, vars),
-                  description: renderTemplate(welcomeTemplate.description, vars),
-                  importance: "LOW",
-                  publish_at: userCreated,
-                },
-              ]
-            : [];
-
-        const merged: RenderedNotification[] = [...welcome, ...renderedFromDb]
+        const merged: RenderedNotification[] = renderedFromDb
           .filter((n) => n.publish_at.getTime() <= now.getTime())
           .sort((a, b) => b.publish_at.getTime() - a.publish_at.getTime())
           .slice(0, 10);
@@ -189,8 +194,7 @@ export const notificationRoutes = new Elysia({ prefix: "/notifications" }).guard
             OR: audienceOr,
           },
         });
-        const unreadWelcome = includeWelcome && userCreated.getTime() > readAt.getTime() ? 1 : 0;
-        const unreadCount = unreadDbCount + unreadWelcome;
+        const unreadCount = unreadDbCount;
 
         const next = await prisma.notification.findFirst({
           where: {

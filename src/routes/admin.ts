@@ -139,7 +139,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
       )
       .get("/notifications", async (ctx) => {
         const entries = await prisma.notification.findMany({
-          orderBy: [{ publish_at: "desc" }],
+          orderBy: [{ is_welcome: "desc" }, { publish_at: "desc" }],
           take: 200,
           include: { recipients: { select: { user_id: true } } },
         });
@@ -147,6 +147,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           id: string;
           title: string;
           description: string;
+          is_welcome: boolean;
           importance: string;
           publish_at: Date;
           status: string;
@@ -161,6 +162,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             id: e.id,
             title: e.title,
             description: e.description,
+            isWelcome: Boolean(e.is_welcome),
             importance: e.importance,
             publishAt: e.publish_at,
             status: e.status,
@@ -185,12 +187,90 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
           const importance = body.importance;
           const status = body.status;
           const publishAt = new Date(body.publishAt);
+          const isWelcome = Boolean(body.isWelcome);
           const rawRecipientIds = body.recipientUserIds ?? [];
           const rawRecipientOrgIds = body.recipientOrganizationIds ?? [];
           const rawRecipientRoles = body.recipientRoles ?? [];
           if (!Number.isFinite(publishAt.getTime())) {
             set.status = 400;
             return { ok: false, code: "INVALID_PUBLISH_AT" };
+          }
+
+          if (isWelcome) {
+            const saved = await prisma.$transaction(async (tx) => {
+              const existingWelcome = await tx.notification.findFirst({
+                where: { organization_id: authUser.organizationId, is_welcome: true },
+                select: { id: true },
+              });
+              const row = existingWelcome
+                ? await tx.notification.update({
+                    where: { id: existingWelcome.id },
+                    data: {
+                      title,
+                      description,
+                      importance,
+                      status,
+                      publish_at: publishAt,
+                      is_welcome: true,
+                      recipient_organization_ids: rawRecipientOrgIds,
+                      recipient_roles: rawRecipientRoles,
+                      updated_by: authUser.userId,
+                    },
+                  })
+                : await tx.notification.create({
+                    data: {
+                      organization_id: authUser.organizationId,
+                      title,
+                      description,
+                      importance,
+                      status,
+                      publish_at: publishAt,
+                      is_welcome: true,
+                      recipient_organization_ids: rawRecipientOrgIds,
+                      recipient_roles: rawRecipientRoles,
+                      created_by: authUser.userId,
+                      updated_by: authUser.userId,
+                    },
+                  });
+
+              const validUsers = rawRecipientIds.length
+                ? await tx.user.findMany({
+                    where: { id: { in: rawRecipientIds } },
+                    select: { id: true },
+                  })
+                : [];
+              await tx.notificationRecipient.deleteMany({ where: { notification_id: row.id } });
+              if (validUsers.length) {
+                await tx.notificationRecipient.createMany({
+                  data: validUsers.map((u) => ({ notification_id: row.id, user_id: u.id })),
+                  skipDuplicates: true,
+                });
+              }
+
+              if (status === "ACTIVE") {
+                const active = await tx.notification.findMany({
+                  where: {
+                    status: "ACTIVE",
+                    organization_id: authUser.organizationId,
+                    is_welcome: false,
+                  },
+                  orderBy: [{ publish_at: "desc" }],
+                  select: { id: true },
+                  take: 50,
+                });
+                if (active.length > 10) {
+                  const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
+                  await tx.notification.updateMany({
+                    where: { id: { in: toDeactivate } },
+                    data: { status: "INACTIVE", updated_by: authUser.userId },
+                  });
+                }
+              }
+
+              return row;
+            });
+            set.status = 200;
+            return { entry: saved };
           }
 
           if (id) {
@@ -208,6 +288,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                   importance,
                   status,
                   publish_at: publishAt,
+                  is_welcome: false,
                   recipient_organization_ids: rawRecipientOrgIds,
                   recipient_roles: rawRecipientRoles,
                   updated_by: authUser.userId,
@@ -230,7 +311,11 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
 
               if (status === "ACTIVE") {
                 const active = await tx.notification.findMany({
-                  where: { status: "ACTIVE" },
+                  where: {
+                    status: "ACTIVE",
+                    organization_id: authUser.organizationId,
+                    is_welcome: false,
+                  },
                   orderBy: [{ publish_at: "desc" }],
                   select: { id: true },
                   take: 50,
@@ -262,6 +347,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
                 importance,
                 status,
                 publish_at: publishAt,
+                is_welcome: false,
                 recipient_organization_ids: rawRecipientOrgIds,
                 recipient_roles: rawRecipientRoles,
                 created_by: authUser.userId,
@@ -284,7 +370,11 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
 
             if (status === "ACTIVE") {
               const active = await tx.notification.findMany({
-                where: { status: "ACTIVE" },
+                where: {
+                  status: "ACTIVE",
+                  organization_id: authUser.organizationId,
+                  is_welcome: false,
+                },
                 orderBy: [{ publish_at: "desc" }],
                 select: { id: true },
                 take: 50,
@@ -307,6 +397,7 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
             id: t.Optional(t.String({ minLength: 10, maxLength: 60 })),
             title: t.String({ minLength: 2, maxLength: 120 }),
             description: t.String({ minLength: 2, maxLength: 260 }),
+            isWelcome: t.Optional(t.Boolean()),
             importance: t.Union([
               t.Literal("LOW"),
               t.Literal("MEDIUM"),
@@ -325,23 +416,37 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
       )
       .get("/notification-templates/welcome", async (ctx) => {
         const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-        const entry = await prisma.notificationTemplate.upsert({
-          where: { key: "WELCOME" },
-          create: {
-            key: "WELCOME",
-            title: "Welcome in, {{name}}",
-            description:
-              "Hey {{name}} — welcome to Cuan Yuk. You’re officially in. Tap around, explore the dashboard, and start stacking wins today.",
-            status: "ACTIVE",
-            created_by: authUser.userId,
-            updated_by: authUser.userId,
-          },
-          update: {},
-          select: { key: true, status: true, title: true, description: true, updated_date: true },
+        const now = new Date();
+        const existing = await prisma.notification.findFirst({
+          where: { organization_id: authUser.organizationId, is_welcome: true },
+          select: { id: true },
         });
+        const entry = existing
+          ? await prisma.notification.update({
+              where: { id: existing.id },
+              data: { updated_by: authUser.userId },
+              select: { status: true, title: true, description: true, updated_date: true },
+            })
+          : await prisma.notification.create({
+              data: {
+                organization_id: authUser.organizationId,
+                title: "Welcome in, {{name}}",
+                description:
+                  "Hey {{name}} — welcome to Cuan Yuk. You’re officially in. Tap around, explore the dashboard, and start stacking wins today.",
+                importance: "LOW",
+                status: "ACTIVE",
+                publish_at: now,
+                is_welcome: true,
+                recipient_organization_ids: [],
+                recipient_roles: [],
+                created_by: authUser.userId,
+                updated_by: authUser.userId,
+              },
+              select: { status: true, title: true, description: true, updated_date: true },
+            });
         return {
           template: {
-            key: entry.key,
+            key: "WELCOME",
             status: entry.status,
             title: entry.title,
             description: entry.description,
@@ -354,28 +459,44 @@ export const adminRoutes = new Elysia({ prefix: "/admin" }).guard(
         async (ctx) => {
           const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
           const body = ctx.body;
-          const updated = await prisma.notificationTemplate.upsert({
-            where: { key: "WELCOME" },
-            create: {
-              key: "WELCOME",
-              title: body.title.trim(),
-              description: body.description.trim(),
-              status: body.status,
-              created_by: authUser.userId,
-              updated_by: authUser.userId,
-            },
-            update: {
-              title: body.title.trim(),
-              description: body.description.trim(),
-              status: body.status,
-              updated_by: authUser.userId,
-            },
-            select: { key: true, status: true, title: true, description: true, updated_date: true },
+          const now = new Date();
+          const existing = await prisma.notification.findFirst({
+            where: { organization_id: authUser.organizationId, is_welcome: true },
+            select: { id: true },
           });
+          const updated = existing
+            ? await prisma.notification.update({
+                where: { id: existing.id },
+                data: {
+                  title: body.title.trim(),
+                  description: body.description.trim(),
+                  status: body.status,
+                  publish_at: now,
+                  is_welcome: true,
+                  updated_by: authUser.userId,
+                },
+                select: { status: true, title: true, description: true, updated_date: true },
+              })
+            : await prisma.notification.create({
+                data: {
+                  organization_id: authUser.organizationId,
+                  title: body.title.trim(),
+                  description: body.description.trim(),
+                  importance: "LOW",
+                  status: body.status,
+                  publish_at: now,
+                  is_welcome: true,
+                  recipient_organization_ids: [],
+                  recipient_roles: [],
+                  created_by: authUser.userId,
+                  updated_by: authUser.userId,
+                },
+                select: { status: true, title: true, description: true, updated_date: true },
+              });
           return {
             ok: true,
             template: {
-              key: updated.key,
+              key: "WELCOME",
               status: updated.status,
               title: updated.title,
               description: updated.description,

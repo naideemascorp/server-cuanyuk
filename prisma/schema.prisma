@@ -100,6 +100,7 @@ model Notification {
   title           String
   description     String
   publish_at      DateTime               @default(now())
+  is_welcome      Boolean                @default(false)
   recipient_organization_ids String[]    @default([])
   recipient_roles            UserRole[]  @default([])
   recipients      NotificationRecipient[]

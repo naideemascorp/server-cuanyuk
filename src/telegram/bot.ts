@@ -197,7 +197,7 @@ export const startTelegramBot = async () => {
       });
       if (user?.status !== "ACTIVE" || !user.email_verified_at) {
         stages.delete(telegramId);
-        await ctx.reply("Login unavailable. Use the web app to verify your account first.");
+        await ctx.reply("Sign in unavailable. Use the web app to verify your account first.");
         return;
       }
 
