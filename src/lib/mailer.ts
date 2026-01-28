@@ -1,14 +1,5 @@
 import { config } from "@/config";
-import nodemailer from "nodemailer";
-
-export const mailer = nodemailer.createTransport({
-  host: config.smtp.host,
-  port: config.smtp.port,
-  auth: {
-    user: config.smtp.user,
-    pass: config.smtp.pass,
-  },
-});
+import { sendSmtpMail } from "@/lib/smtp";
 
 const baseEmailHtml = (opts: {
   title: string;
@@ -56,35 +47,51 @@ const baseEmailHtml = (opts: {
 };
 
 export const sendEmailVerification = async (to: string, verificationUrl: string) => {
-  await mailer.sendMail({
-    from: config.smtp.from,
-    to,
-    subject: "Verify your email",
-    text: `Verify your email: ${verificationUrl}`,
-    html: baseEmailHtml({
-      title: "Verify your email",
-      preview: "Verify your email to activate your account.",
-      heading: "Verify your email",
-      bodyHtml: "Tap the button below to verify your email and activate your account.",
-      buttonText: "Verify Email",
-      buttonUrl: verificationUrl,
-    }),
-  });
+  await sendSmtpMail(
+    {
+      host: config.smtp.host,
+      port: config.smtp.port,
+      user: config.smtp.user,
+      pass: config.smtp.pass,
+    },
+    {
+      from: config.smtp.from,
+      to,
+      subject: "Verify your email",
+      text: `Verify your email: ${verificationUrl}`,
+      html: baseEmailHtml({
+        title: "Verify your email",
+        preview: "Verify your email to activate your account.",
+        heading: "Verify your email",
+        bodyHtml: "Tap the button below to verify your email and activate your account.",
+        buttonText: "Verify Email",
+        buttonUrl: verificationUrl,
+      }),
+    },
+  );
 };
 
 export const sendPasswordResetEmail = async (to: string, resetUrl: string) => {
-  await mailer.sendMail({
-    from: config.smtp.from,
-    to,
-    subject: "Reset your password",
-    text: `Reset your password: ${resetUrl}`,
-    html: baseEmailHtml({
-      title: "Reset your password",
-      preview: "Use this link to reset your password (expires in 1 day).",
-      heading: "Reset your password",
-      bodyHtml: "We received a request to reset your password. This link expires in 1 day.",
-      buttonText: "Reset Password",
-      buttonUrl: resetUrl,
-    }),
-  });
+  await sendSmtpMail(
+    {
+      host: config.smtp.host,
+      port: config.smtp.port,
+      user: config.smtp.user,
+      pass: config.smtp.pass,
+    },
+    {
+      from: config.smtp.from,
+      to,
+      subject: "Reset your password",
+      text: `Reset your password: ${resetUrl}`,
+      html: baseEmailHtml({
+        title: "Reset your password",
+        preview: "Use this link to reset your password (expires in 1 day).",
+        heading: "Reset your password",
+        bodyHtml: "We received a request to reset your password. This link expires in 1 day.",
+        buttonText: "Reset Password",
+        buttonUrl: resetUrl,
+      }),
+    },
+  );
 };

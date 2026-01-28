@@ -1,12 +1,14 @@
 import { unlink } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import { config } from "@/config";
+import { ok as apiOk, failBug, isApiResponse } from "@/lib/api-response";
 import { getDeviceIdFromContext } from "@/lib/device";
 import { getClientIpFromContext } from "@/lib/ip";
 import { prisma } from "@/lib/prisma";
 import { startExpirationSweep } from "@/lib/scheduler";
 import { makeShareToken, verifyShareToken } from "@/lib/share";
 import { resolveUploadPath } from "@/lib/storage";
+import { verifySessionToken } from "@/lib/token";
 import type { AuthUser } from "@/lib/types";
 import { wsRegistry } from "@/lib/ws";
 import { adminRoutes } from "@/routes/admin";
@@ -16,29 +18,97 @@ import { merchantRoutes } from "@/routes/merchants";
 import { notificationRoutes } from "@/routes/notifications";
 import { paymentRoutes } from "@/routes/payments";
 import { startTelegramBot } from "@/telegram/bot";
-import { cors } from "@elysiajs/cors";
-import { jwt } from "@elysiajs/jwt";
-import { swagger } from "@elysiajs/swagger";
 import { Elysia, t } from "elysia";
+
+const pickCorsOrigin = (originHeader: string | null): string | null => {
+  if (!originHeader) return null;
+  const origin = originHeader.trim();
+  if (!origin) return null;
+  for (const allowed of config.corsOrigins) {
+    if (typeof allowed === "string") {
+      if (origin === allowed) return origin;
+    } else if (allowed instanceof RegExp) {
+      if (allowed.test(origin)) return origin;
+    }
+  }
+  return null;
+};
+
+const buildHeaders = (setHeaders: Record<string, string | number | undefined>) => {
+  const headers = new Headers();
+  for (const [k, v] of Object.entries(setHeaders)) {
+    if (typeof v === "string") headers.set(k, v);
+    else if (typeof v === "number") headers.set(k, String(v));
+  }
+  return headers;
+};
+
+const jsonResponse = (
+  data: unknown,
+  set: { status?: number | string; headers: Record<string, string | number | undefined> },
+) => {
+  const statusNumber = typeof set.status === "number" ? set.status : Number(set.status ?? 200);
+  const headers = buildHeaders(set.headers);
+  if (!headers.has("content-type")) headers.set("content-type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(data), {
+    status: Number.isFinite(statusNumber) ? statusNumber : 200,
+    headers,
+  });
+};
 
 const app = new Elysia()
   .decorate("authUser", null as AuthUser | null)
-  .use(
-    cors({
-      origin: config.corsOrigins,
-      credentials: true,
-      allowedHeaders: ["content-type", "authorization", "x-device-id"],
-    }),
-  )
-  .use(
-    jwt({
-      name: "jwt",
-      secret: config.jwtSecret,
-      exp: "30m",
-    }),
-  )
-  .use(swagger({ path: "/docs" }))
-  .derive(async ({ request, jwt, cookie }) => {
+  .onRequest(({ request, set }) => {
+    const origin = pickCorsOrigin(request.headers.get("origin"));
+    if (origin) {
+      set.headers["access-control-allow-origin"] = origin;
+      set.headers["access-control-allow-credentials"] = "true";
+      set.headers.vary = "origin";
+    }
+    if (request.method === "OPTIONS") {
+      if (origin) {
+        set.headers["access-control-allow-methods"] = "GET,POST,PUT,PATCH,DELETE,OPTIONS";
+        set.headers["access-control-allow-headers"] = "content-type,authorization,x-device-id";
+      }
+      set.status = 204;
+      return new Response(null, { status: 204, headers: buildHeaders(set.headers) });
+    }
+  })
+  .onError(({ error, set }) => {
+    const statusNumber = typeof set.status === "number" ? set.status : Number(set.status ?? 500);
+    if (!Number.isFinite(statusNumber) || statusNumber < 400) set.status = 500;
+    const what = "UNHANDLED_ERROR";
+    const why = error instanceof Error ? error.message : "Unknown error";
+    const how = "Check server logs/stack trace and fix the exception.";
+    return failBug(what, why, how);
+  })
+  .mapResponse(({ response, set }) => {
+    if (response instanceof Response) return response;
+    const statusNumber = typeof set.status === "number" ? set.status : Number(set.status ?? 200);
+    if (Number.isFinite(statusNumber) && statusNumber === 204) return new Response(null, { status: 204 });
+    if (typeof response === "string") {
+      return new Response(response, {
+        status: Number.isFinite(statusNumber) ? statusNumber : 200,
+        headers: buildHeaders(set.headers),
+      });
+    }
+    if (isApiResponse(response)) return jsonResponse(response, set);
+    if (response && typeof response === "object") {
+      const rec = response as Record<string, unknown>;
+      if (typeof rec.ok === "boolean") {
+        if (rec.ok) {
+          const { ok: _ok, ...rest } = rec;
+          return jsonResponse(apiOk(Object.keys(rest).length ? rest : undefined), set);
+        }
+        const code = typeof rec.code === "string" ? rec.code : "REQUEST_FAILED";
+        const existingStatus = typeof set.status === "number" ? set.status : Number(set.status ?? 0);
+        set.status = Number.isFinite(existingStatus) && existingStatus >= 400 ? existingStatus : 400;
+        return jsonResponse(failBug(code, "Request rejected.", "Validate inputs and retry."), set);
+      }
+    }
+    return jsonResponse(apiOk(typeof response === "undefined" ? undefined : response), set);
+  })
+  .derive(async ({ request, cookie }) => {
     const authHeader = request.headers.get("authorization");
     const bearer = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
     const rawCookieValue = cookie.session?.value;
@@ -46,12 +116,9 @@ const app = new Elysia()
     const token = bearer ?? cookieToken ?? null;
 
     if (!token) return { authUser: null };
-    const payload = await jwt.verify(token);
-    if (!payload || typeof payload !== "object") return { authUser: null };
-    const p = payload as Record<string, unknown>;
-    const sub = typeof p.sub === "string" ? p.sub : undefined;
-    const org = typeof p.org === "string" ? p.org : undefined;
-    const jti = typeof p.jti === "string" ? p.jti : undefined;
+    const payload = await verifySessionToken(token, config.jwtSecret);
+    if (!payload) return { authUser: null };
+    const { sub, org, jti } = payload;
     if (!sub || !org || !jti) return { authUser: null };
 
     const session = await prisma.session.findFirst({

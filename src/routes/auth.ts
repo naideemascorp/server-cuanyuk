@@ -4,6 +4,7 @@ import { hashPassword, verifyPassword } from "@/lib/auth";
 import { getDeviceIdFromContext } from "@/lib/device";
 import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
 import { prisma } from "@/lib/prisma";
+import { signSessionToken } from "@/lib/token";
 import { Elysia, t } from "elysia";
 
 const oneDayMs = 24 * 60 * 60 * 1000;
@@ -511,9 +512,6 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
   .post(
     "/signin",
     async (ctx) => {
-      type JwtSigner = {
-        sign: (payload: { sub: string; org: string; jti: string }) => Promise<string>;
-      };
       type CookieSession = {
         session: {
           set: (opts: {
@@ -528,7 +526,6 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       };
 
       const body = ctx.body;
-      const jwt = (ctx as unknown as { jwt: JwtSigner }).jwt;
       const cookie = (ctx as unknown as { cookie: CookieSession }).cookie;
       const set = ctx.set;
       const identifierRaw = (body?.identifier ?? body?.email ?? "").trim();
@@ -585,11 +582,11 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         },
       });
 
-      const token = await jwt.sign({
-        sub: user.id,
-        org: user.organization_id,
-        jti: jwtId,
-      });
+      const token = await signSessionToken(
+        { sub: user.id, org: user.organization_id, jti: jwtId },
+        config.jwtSecret,
+        30 * 60,
+      );
 
       cookie.session.set({
         value: token,
