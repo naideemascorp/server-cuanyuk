@@ -310,9 +310,9 @@ model CashTransaction {
   transaction_date DateTime
   order_number    String
   total_amount    Int          @default(0)
-  my_fee_bps      Int          @default(0)
   customer_fee_bps Int         @default(0)
   merchant_fee_bps Int         @default(0)
+  remarks         String?
 
   merchant_id     String
   merchant        Merchant     @relation(fields: [merchant_id], references: [id], onDelete: Restrict)

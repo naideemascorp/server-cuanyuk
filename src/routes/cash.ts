@@ -10,9 +10,9 @@ type CashTransactionRow = {
   transaction_date: Date;
   order_number: string;
   total_amount: number;
-  my_fee_bps: number;
   customer_fee_bps: number;
   merchant_fee_bps: number;
+  remarks: string | null;
   merchant: { id: string; name: string };
   partner: { id: string; name: string };
 };
@@ -32,19 +32,23 @@ const parseBpsFromPercent = (raw: string | number): number => {
   return clampInt(Math.round(n * 100), 0, 10_000);
 };
 
-const parseBpsFromPercentOptional = (raw: string | number | undefined): number => {
-  if (raw === undefined) return 0;
-  return parseBpsFromPercent(raw);
-};
-
 const escapeCsv = (v: string) => {
   const needs = /[",\n\r]/.test(v);
   if (!needs) return v;
   return `"${v.replaceAll('"', '""')}"`;
 };
 
+const stripXmlControlChars = (s: string) => {
+  let out = "";
+  for (let i = 0; i < s.length; i += 1) {
+    const c = s.charCodeAt(i);
+    if (c === 0x9 || c === 0xa || c === 0xd || c >= 0x20) out += s[i];
+  }
+  return out;
+};
+
 const xmlEscape = (s: string) =>
-  s
+  stripXmlControlChars(s)
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -54,33 +58,178 @@ const xmlEscape = (s: string) =>
 const bpsAmount = (totalAmount: number, bps: number) => Math.trunc((totalAmount * bps) / 10_000);
 
 const computeGrossProfit = (row: CashTransactionRow) =>
-  bpsAmount(row.total_amount, row.my_fee_bps + row.customer_fee_bps);
+  bpsAmount(row.total_amount, row.customer_fee_bps);
 
 const computeNetProfit = (row: CashTransactionRow) =>
-  bpsAmount(row.total_amount, row.my_fee_bps + row.customer_fee_bps - row.merchant_fee_bps);
+  bpsAmount(row.total_amount, row.customer_fee_bps - row.merchant_fee_bps);
 
-const buildPdf = (title: string, lines: string[]) => {
-  const textLines = [title, "", ...lines].slice(0, 60);
-  const content = [
-    "BT",
-    "/F1 12 Tf",
-    "40 800 Td",
-    ...textLines.map(
-      (l, idx) =>
-        `${idx === 0 ? "" : "0 -14 Td\n"}(${l.replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)")}) Tj`,
-    ),
-    "ET",
-  ].join("\n");
+const cashTypeLabel = (t: CashTransactionRow["cash_type"]) =>
+  t === "CASH_IN" ? "Cash In" : "Cash Out";
+const cashStatusLabel = (s: CashTransactionRow["status"]) =>
+  s === "ACTIVE" ? "Success" : s === "PENDING" ? "Pending" : s;
+
+const exportAmounts = (row: CashTransactionRow) => {
+  const customerFeeAmount = computeGrossProfit(row);
+  const merchantFeeAmount = bpsAmount(row.total_amount, row.merchant_fee_bps);
+  const netProfit = customerFeeAmount - merchantFeeAmount;
+  return {
+    customerFeeAmount,
+    merchantFeeAmount,
+    netProfit,
+    receiveFromMerchantAmount: row.total_amount - merchantFeeAmount,
+    payToCustomerAmount: row.total_amount - customerFeeAmount,
+  };
+};
+
+const buildPdf = (title: string, header: string[], rows: string[][]) => {
+  const sanitize = (s: string) => s.replaceAll(/[^\x20-\x7e]/g, "?").replaceAll("\n", " ");
+  const esc = (s: string) =>
+    sanitize(s).replaceAll("\\", "\\\\").replaceAll("(", "\\(").replaceAll(")", "\\)");
+  const pageW = 842;
+  const pageH = 595;
+  const marginX = 24;
+  const marginBottom = 22;
+  const titleY = pageH - 26;
+  const tableTopY = pageH - 56;
+  const rowH = 20;
+  const headerH = 26;
+  const colW = [100, 50, 56, 70, 70, 70, 66, 66, 66, 60, 70, 70];
+  const maxTableW = pageW - marginX * 2;
+  const tableW = Math.min(
+    maxTableW,
+    colW.reduce((a, b) => a + b, 0),
+  );
+  const widths = (() => {
+    const sum = colW.reduce((a, b) => a + b, 0);
+    if (sum <= tableW) return colW;
+    const scale = tableW / sum;
+    return colW.map((w) => Math.max(50, Math.floor(w * scale)));
+  })();
+  const fit = (s: string, w: number) => {
+    const approxChars = Math.max(6, Math.floor((w - 10) / 5.2));
+    const v = s.trim().replaceAll(/\s+/g, " ");
+    if (v.length <= approxChars) return v;
+    return `${v.slice(0, Math.max(0, approxChars - 3)).trimEnd()}...`;
+  };
+  const chunkSize = Math.max(1, Math.floor((tableTopY - marginBottom - headerH) / rowH));
+  const pages: Array<{ idx: number; data: string[][] }> = [];
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    pages.push({ idx: pages.length + 1, data: rows.slice(i, i + chunkSize) });
+  }
+  if (pages.length === 0) pages.push({ idx: 1, data: [] });
+
+  const mkPageContent = (pageIdx: number, pageTotal: number, data: string[][]) => {
+    const cmds: string[] = [];
+    cmds.push("q");
+    cmds.push("0.22 0.24 0.28 RG");
+    cmds.push("0.45 w");
+
+    cmds.push("BT");
+    cmds.push("/F2 16 Tf");
+    cmds.push(`1 0 0 1 ${marginX} ${titleY} Tm`);
+    cmds.push(`(${esc(title)}) Tj`);
+    cmds.push("ET");
+
+    cmds.push("BT");
+    cmds.push("/F1 9 Tf");
+    cmds.push(`1 0 0 1 ${pageW - marginX - 170} ${titleY} Tm`);
+    cmds.push(`(Page ${pageIdx} of ${pageTotal}) Tj`);
+    cmds.push("ET");
+
+    const x0 = marginX;
+    const y0 = tableTopY;
+    const tableH = headerH + data.length * rowH;
+    cmds.push("q");
+    cmds.push("0.08 0.10 0.14 rg");
+    cmds.push(`${x0} ${y0 - headerH} ${tableW} ${headerH} re f`);
+    cmds.push("Q");
+
+    for (let r = 0; r < data.length; r++) {
+      if (r % 2 === 1) {
+        const y = y0 - headerH - (r + 1) * rowH;
+        cmds.push("q");
+        cmds.push("0.97 0.98 0.99 rg");
+        cmds.push(`${x0} ${y} ${tableW} ${rowH} re f`);
+        cmds.push("Q");
+      }
+    }
+
+    cmds.push(`${x0} ${y0 - tableH} ${tableW} ${tableH} re S`);
+    let x = x0;
+    for (let c = 0; c < widths.length - 1; c++) {
+      x += widths[c];
+      cmds.push(`${x} ${y0 - tableH} m ${x} ${y0} l S`);
+    }
+    cmds.push(`${x0} ${y0 - headerH} m ${x0 + tableW} ${y0 - headerH} l S`);
+    for (let r = 0; r < data.length; r++) {
+      const y = y0 - headerH - (r + 1) * rowH;
+      cmds.push(`${x0} ${y} m ${x0 + tableW} ${y} l S`);
+    }
+
+    const headerY = y0 - 18;
+    let cx = x0;
+    cmds.push("0.98 0.99 1 rg");
+    for (let i = 0; i < header.length; i++) {
+      cmds.push("BT");
+      cmds.push("/F2 9 Tf");
+      cmds.push(`1 0 0 1 ${cx + 5} ${headerY} Tm`);
+      cmds.push(`(${esc(fit(header[i] ?? "", widths[i] ?? 80))}) Tj`);
+      cmds.push("ET");
+      cx += widths[i] ?? 0;
+    }
+    cmds.push("0 0 0 rg");
+
+    const rightAlignedCols = new Set([6, 7, 8, 9, 10, 11]);
+    for (let r = 0; r < data.length; r++) {
+      const row = data[r] ?? [];
+      const baseY = y0 - headerH - r * rowH - 15;
+      cx = x0;
+      for (let c = 0; c < widths.length; c++) {
+        const raw = row[c] ?? "";
+        const fitted = fit(raw, widths[c] ?? 80);
+        const approxCharW = 4.3;
+        const textW = fitted.length * approxCharW;
+        const tx = rightAlignedCols.has(c) ? cx + (widths[c] ?? 80) - 6 - textW : cx + 5;
+        cmds.push("BT");
+        cmds.push("/F1 8 Tf");
+        cmds.push(`1 0 0 1 ${tx.toFixed(2)} ${baseY} Tm`);
+        cmds.push(`(${esc(fitted)}) Tj`);
+        cmds.push("ET");
+        cx += widths[c] ?? 0;
+      }
+    }
+
+    cmds.push("Q");
+    return cmds.join("\n");
+  };
 
   const objects: Array<{ id: number; body: string }> = [];
   objects.push({ id: 1, body: "<< /Type /Catalog /Pages 2 0 R >>" });
-  objects.push({ id: 2, body: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" });
+  const kids = pages.map((_, idx) => `${3 + idx * 2} 0 R`).join(" ");
+  objects.push({ id: 2, body: `<< /Type /Pages /Kids [${kids}] /Count ${pages.length} >>` });
+
+  const fontF1Id = 3 + pages.length * 2;
+  const fontF2Id = fontF1Id + 1;
+
+  for (let i = 0; i < pages.length; i++) {
+    const pageObjId = 3 + i * 2;
+    const contentObjId = pageObjId + 1;
+    const content = mkPageContent(i + 1, pages.length, pages[i]?.data ?? []);
+    objects.push({
+      id: pageObjId,
+      body: `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageW} ${pageH}] /Resources << /Font << /F1 ${fontF1Id} 0 R /F2 ${fontF2Id} 0 R >> >> /Contents ${contentObjId} 0 R >>`,
+    });
+    objects.push({
+      id: contentObjId,
+      body: `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    });
+  }
+
+  objects.push({ id: fontF1Id, body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" });
   objects.push({
-    id: 3,
-    body: "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    id: fontF2Id,
+    body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
   });
-  objects.push({ id: 4, body: `<< /Length ${content.length} >>\nstream\n${content}\nendstream` });
-  objects.push({ id: 5, body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" });
 
   let out = "%PDF-1.4\n";
   const offsets: number[] = [0];
@@ -133,6 +282,15 @@ const zipStore = (files: Array<{ name: string; data: Uint8Array }>) => {
   const locals: Uint8Array[] = [];
   const centrals: Uint8Array[] = [];
   let offset = 0;
+  const now = new Date();
+  const dosTime =
+    ((now.getHours() & 0x1f) << 11) |
+    ((now.getMinutes() & 0x3f) << 5) |
+    ((Math.floor(now.getSeconds() / 2) & 0x1f) << 0);
+  const dosDate =
+    ((Math.max(0, now.getFullYear() - 1980) & 0x7f) << 9) |
+    (((now.getMonth() + 1) & 0xf) << 5) |
+    (now.getDate() & 0x1f);
 
   for (const f of files) {
     const nameBytes = enc.encode(f.name);
@@ -142,8 +300,8 @@ const zipStore = (files: Array<{ name: string; data: Uint8Array }>) => {
       u16(20),
       u16(0),
       u16(0),
-      u16(0),
-      u16(0),
+      u16(dosTime),
+      u16(dosDate),
       u32(crc),
       u32(f.data.length),
       u32(f.data.length),
@@ -159,8 +317,8 @@ const zipStore = (files: Array<{ name: string; data: Uint8Array }>) => {
       u16(20),
       u16(0),
       u16(0),
-      u16(0),
-      u16(0),
+      u16(dosTime),
+      u16(dosDate),
       u32(crc),
       u32(f.data.length),
       u32(f.data.length),
@@ -195,90 +353,271 @@ const zipStore = (files: Array<{ name: string; data: Uint8Array }>) => {
 
 const buildXlsx = (rows: CashTransactionRow[]) => {
   const cols = [
-    "Transaction Date",
-    "Cash Type",
+    "Date",
+    "Type",
     "Status",
-    "Order Number",
+    "Order",
     "Partner",
     "Merchant",
-    "Total Amount",
-    "My Fee (%)",
-    "Customer Fee (%)",
-    "Merchant Fee (%)",
-    "Gross Profit",
-    "Net Profit",
+    "Base",
+    "Customer Fee",
+    "Merchant Fee",
+    "Net",
+    "From Merchant",
+    "To Customer",
   ];
 
-  const cell = (v: string, t: "s" | "n") =>
-    t === "n" ? `<c t="n"><v>${v}</v></c>` : `<c t="inlineStr"><is><t>${xmlEscape(v)}</t></is></c>`;
+  const colName = (idx: number) => {
+    let n = idx + 1;
+    let out = "";
+    while (n > 0) {
+      const r = (n - 1) % 26;
+      out = String.fromCharCode(65 + r) + out;
+      n = Math.floor((n - 1) / 26);
+    }
+    return out;
+  };
+  const cell = (ref: string, v: string, kind: "s" | "n", s: number) => {
+    if (kind === "n") return `<c r="${ref}" t="n" s="${s}"><v>${v}</v></c>`;
+    return `<c r="${ref}" t="inlineStr" s="${s}"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
+  };
 
-  const headerRow = `<row r="1">${cols.map((c) => cell(c, "s")).join("")}</row>`;
+  const headerRow = `<row r="1">${cols.map((c, i) => cell(`${colName(i)}1`, c, "s", 1)).join("")}</row>`;
   const dataRows = rows
     .slice(0, 20_000)
     .map((r, i) => {
-      const gross = computeGrossProfit(r);
-      const net = computeNetProfit(r);
-      const percent = (bps: number) => (bps / 100).toFixed(2);
-      const cells = [
-        cell(r.transaction_date.toISOString(), "s"),
-        cell(r.cash_type, "s"),
-        cell(r.status, "s"),
-        cell(r.order_number, "s"),
-        cell(r.partner.name, "s"),
-        cell(r.merchant.name, "s"),
-        cell(String(r.total_amount), "n"),
-        cell(percent(r.my_fee_bps), "s"),
-        cell(percent(r.customer_fee_bps), "s"),
-        cell(percent(r.merchant_fee_bps), "s"),
-        cell(String(gross), "n"),
-        cell(String(net), "n"),
+      const rowNo = i + 2;
+      const amounts = exportAmounts(r);
+      const values: Array<{ v: string; kind: "s" | "n"; style: number }> = [
+        { v: r.transaction_date.toISOString().slice(0, 19).replace("T", " "), kind: "s", style: 2 },
+        { v: cashTypeLabel(r.cash_type), kind: "s", style: 2 },
+        { v: cashStatusLabel(r.status), kind: "s", style: 2 },
+        { v: r.order_number, kind: "s", style: 2 },
+        { v: r.partner.name, kind: "s", style: 2 },
+        { v: r.merchant.name, kind: "s", style: 2 },
+        { v: String(r.total_amount), kind: "n", style: 3 },
+        { v: String(amounts.customerFeeAmount), kind: "n", style: 3 },
+        { v: String(amounts.merchantFeeAmount), kind: "n", style: 3 },
+        { v: String(amounts.netProfit), kind: "n", style: 3 },
+        { v: String(amounts.receiveFromMerchantAmount), kind: "n", style: 3 },
+        { v: String(amounts.payToCustomerAmount), kind: "n", style: 3 },
       ];
-      return `<row r="${i + 2}">${cells.join("")}</row>`;
+      const cells = values.map((c, idx) => cell(`${colName(idx)}${rowNo}`, c.v, c.kind, c.style));
+      return `<row r="${rowNo}">${cells.join("")}</row>`;
     })
     .join("");
 
+  const colWidths = [20, 10, 12, 18, 18, 22, 14, 14, 14, 14, 18, 18];
+  const colsXml = `<cols>${colWidths
+    .map((w, i) => `<col min="${i + 1}" max="${i + 1}" width="${w}" customWidth="1" />`)
+    .join("")}</cols>`;
+  const lastRow = Math.max(1, Math.min(20_001, rows.length + 1));
+  const lastCell = `${colName(cols.length - 1)}${lastRow}`;
+
   const sheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <dimension ref="A1:${lastCell}"/>
+  <sheetViews>
+    <sheetView workbookViewId="0" tabSelected="1"/>
+  </sheetViews>
+  <sheetFormatPr defaultRowHeight="15"/>
+  ${colsXml}
   <sheetData>
     ${headerRow}
     ${dataRows}
   </sheetData>
+  <pageMargins left="0.7" right="0.7" top="0.75" bottom="0.75" header="0.3" footer="0.3"/>
 </worksheet>`;
 
   const workbookXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <fileVersion appName="xl" lastEdited="7" lowestEdited="7" rupBuild="25330"/>
+  <workbookPr defaultThemeVersion="164011"/>
+  <bookViews>
+    <workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="16560"/>
+  </bookViews>
   <sheets>
     <sheet name="Cash In/Out" sheetId="1" r:id="rId1" />
   </sheets>
+  <calcPr calcId="191029" fullCalcOnLoad="1"/>
 </workbook>`;
 
   const relsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml" />
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml" />
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml" />
 </Relationships>`;
 
   const wbRelsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml" />
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml" />
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml" />
 </Relationships>`;
 
   const contentTypesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml" />
   <Default Extension="xml" ContentType="application/xml" />
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml" />
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml" />
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml" />
   <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml" />
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml" />
+  <Override PartName="/xl/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml" />
 </Types>`;
+
+  const stylesXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <numFmts count="0"/>
+  <fonts count="2">
+    <font>
+      <sz val="11"/><color rgb="FF111827"/><name val="Calibri"/><family val="2"/>
+    </font>
+    <font>
+      <b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Calibri"/><family val="2"/>
+    </font>
+  </fonts>
+  <fills count="2">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF0F172A"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFCBD5E1"/></left>
+      <right style="thin"><color rgb="FFCBD5E1"/></right>
+      <top style="thin"><color rgb="FFCBD5E1"/></top>
+      <bottom style="thin"><color rgb="FFCBD5E1"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+  </cellStyleXfs>
+  <cellXfs count="4">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+    <xf numFmtId="0" fontId="1" fillId="1" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1"/>
+    <xf numFmtId="3" fontId="0" fillId="0" borderId="1" xfId="0" applyNumberFormat="1" applyBorder="1"/>
+  </cellXfs>
+  <cellStyles count="1">
+    <cellStyle name="Normal" xfId="0" builtinId="0"/>
+  </cellStyles>
+  <dxfs count="0"/>
+  <tableStyles count="0" defaultTableStyle="TableStyleMedium2" defaultPivotStyle="PivotStyleLight16"/>
+</styleSheet>`;
+
+  const themeXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">
+  <a:themeElements>
+    <a:clrScheme name="Office">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="1F497D"/></a:dk2>
+      <a:lt2><a:srgbClr val="EEECE1"/></a:lt2>
+      <a:accent1><a:srgbClr val="4F81BD"/></a:accent1>
+      <a:accent2><a:srgbClr val="C0504D"/></a:accent2>
+      <a:accent3><a:srgbClr val="9BBB59"/></a:accent3>
+      <a:accent4><a:srgbClr val="8064A2"/></a:accent4>
+      <a:accent5><a:srgbClr val="4BACC6"/></a:accent5>
+      <a:accent6><a:srgbClr val="F79646"/></a:accent6>
+      <a:hlink><a:srgbClr val="0000FF"/></a:hlink>
+      <a:folHlink><a:srgbClr val="800080"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Office">
+      <a:majorFont>
+        <a:latin typeface="Calibri"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:majorFont>
+      <a:minorFont>
+        <a:latin typeface="Calibri"/>
+        <a:ea typeface=""/>
+        <a:cs typeface=""/>
+      </a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Office">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:gradFill rotWithShape="1">
+          <a:gsLst>
+            <a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/><a:satMod val="300000"/></a:schemeClr></a:gs>
+            <a:gs pos="35000"><a:schemeClr val="phClr"><a:tint val="37000"/><a:satMod val="300000"/></a:schemeClr></a:gs>
+            <a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/><a:satMod val="350000"/></a:schemeClr></a:gs>
+          </a:gsLst>
+          <a:lin ang="16200000" scaled="1"/>
+        </a:gradFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="25400" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+        <a:ln w="38100" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+        <a:effectStyle><a:effectLst/></a:effectStyle>
+      </a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+  <a:objectDefaults/>
+  <a:extraClrSchemeLst/>
+</a:theme>`;
+
+  const createdIso = new Date().toISOString();
+  const appXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes">
+  <Application>CuanYuk</Application>
+  <DocSecurity>0</DocSecurity>
+  <ScaleCrop>false</ScaleCrop>
+  <HeadingPairs>
+    <vt:vector size="2" baseType="variant">
+      <vt:variant><vt:lpstr>Worksheets</vt:lpstr></vt:variant>
+      <vt:variant><vt:i4>1</vt:i4></vt:variant>
+    </vt:vector>
+  </HeadingPairs>
+  <TitlesOfParts>
+    <vt:vector size="1" baseType="lpstr">
+      <vt:lpstr>Cash In/Out</vt:lpstr>
+    </vt:vector>
+  </TitlesOfParts>
+  <Company></Company>
+  <LinksUpToDate>false</LinksUpToDate>
+  <SharedDoc>false</SharedDoc>
+  <HyperlinksChanged>false</HyperlinksChanged>
+  <AppVersion>16.0000</AppVersion>
+</Properties>`;
+
+  const coreXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/" xmlns:dcmitype="http://purl.org/dc/dcmitype/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>Cash In/Out</dc:title>
+  <dc:creator>CuanYuk</dc:creator>
+  <cp:lastModifiedBy>CuanYuk</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">${createdIso}</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">${createdIso}</dcterms:modified>
+</cp:coreProperties>`;
 
   const enc = new TextEncoder();
   return zipStore([
     { name: "[Content_Types].xml", data: enc.encode(contentTypesXml) },
     { name: "_rels/.rels", data: enc.encode(relsXml) },
+    { name: "docProps/app.xml", data: enc.encode(appXml) },
+    { name: "docProps/core.xml", data: enc.encode(coreXml) },
     { name: "xl/workbook.xml", data: enc.encode(workbookXml) },
     { name: "xl/_rels/workbook.xml.rels", data: enc.encode(wbRelsXml) },
     { name: "xl/worksheets/sheet1.xml", data: enc.encode(sheetXml) },
+    { name: "xl/styles.xml", data: enc.encode(stylesXml) },
+    { name: "xl/theme/theme1.xml", data: enc.encode(themeXml) },
   ]);
 };
+
+export const __testBuildXlsx = buildXlsx;
 
 const buildTransactionsWhere = (
   authUser: AuthUser,
@@ -286,6 +625,7 @@ const buildTransactionsWhere = (
     from: Date | null;
     to: Date | null;
     cashType: "CASH_IN" | "CASH_OUT" | null;
+    status: "ALL" | "ACTIVE" | "PENDING" | "INACTIVE" | "DELETED" | null;
     search: string | null;
     merchantId: string | null;
     partnerId: string | null;
@@ -304,7 +644,11 @@ const buildTransactionsWhere = (
 
   const where: CashTxWhere = {
     organization_id: authUser.organizationId,
-    status: { in: ["ACTIVE", "PENDING"] },
+    ...(opts.status === "ALL"
+      ? {}
+      : opts.status
+        ? { status: opts.status }
+        : { status: { in: ["ACTIVE", "PENDING"] } }),
     ...(opts.cashType ? { cash_type: opts.cashType } : {}),
     ...(opts.from || opts.to
       ? {
@@ -347,6 +691,7 @@ const fetchTransactions = async (
     from: Date | null;
     to: Date | null;
     cashType: "CASH_IN" | "CASH_OUT" | null;
+    status: "ALL" | "ACTIVE" | "PENDING" | "INACTIVE" | "DELETED" | null;
     search: string | null;
     merchantId: string | null;
     partnerId: string | null;
@@ -369,9 +714,9 @@ const fetchTransactions = async (
       transaction_date: true,
       order_number: true,
       total_amount: true,
-      my_fee_bps: true,
       customer_fee_bps: true,
       merchant_fee_bps: true,
+      remarks: true,
       merchant: { select: { id: true, name: true } },
       partner: { select: { id: true, name: true } },
     },
@@ -427,10 +772,19 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         q.cashType === "CASH_IN" || q.cashType === "CASH_OUT"
           ? (q.cashType as "CASH_IN" | "CASH_OUT")
           : null;
+      const status =
+        q.status === "ALL" ||
+        q.status === "ACTIVE" ||
+        q.status === "PENDING" ||
+        q.status === "INACTIVE" ||
+        q.status === "DELETED"
+          ? q.status
+          : null;
       const where = buildTransactionsWhere(authUser, {
         from,
         to,
         cashType,
+        status,
         search: q.search ?? null,
         merchantId: q.merchantId ?? null,
         partnerId: q.partnerId ?? null,
@@ -442,6 +796,7 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
           from,
           to,
           cashType,
+          status,
           search: q.search ?? null,
           merchantId: q.merchantId ?? null,
           partnerId: q.partnerId ?? null,
@@ -461,10 +816,9 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
           transactionDate: r.transaction_date.toISOString(),
           orderNumber: r.order_number,
           totalAmount: r.total_amount,
-          myFeeBps: r.my_fee_bps,
           customerFeeBps: r.customer_fee_bps,
           merchantFeeBps: r.merchant_fee_bps,
-          myFeeAmount: bpsAmount(r.total_amount, r.my_fee_bps),
+          remarks: r.remarks,
           customerFeeAmount: bpsAmount(r.total_amount, r.customer_fee_bps),
           merchantFeeAmount: bpsAmount(r.total_amount, r.merchant_fee_bps),
           grossProfit: computeGrossProfit(r),
@@ -488,6 +842,15 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         partnerId: t.Optional(t.String()),
         merchantName: t.Optional(t.String()),
         partnerName: t.Optional(t.String()),
+        status: t.Optional(
+          t.Union([
+            t.Literal("ALL"),
+            t.Literal("ACTIVE"),
+            t.Literal("PENDING"),
+            t.Literal("INACTIVE"),
+            t.Literal("DELETED"),
+          ]),
+        ),
         take: t.Optional(t.String()),
         skip: t.Optional(t.String()),
       }),
@@ -512,6 +875,13 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         throw new Error("INVALID_TOTAL_AMOUNT");
       }
 
+      const remarks = (() => {
+        const raw = body.remarks ?? null;
+        if (raw == null) return null;
+        const v = raw.trim();
+        return v ? v : null;
+      })();
+
       const saved = await prisma.cashTransaction.create({
         data: {
           organization_id: authUser.organizationId,
@@ -519,9 +889,9 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
           transaction_date: transactionDate,
           order_number: body.orderNumber.trim(),
           total_amount: totalAmount,
-          my_fee_bps: parseBpsFromPercentOptional(body.myFeePercent),
           customer_fee_bps: parseBpsFromPercent(body.customerFeePercent),
           merchant_fee_bps: parseBpsFromPercent(body.merchantFeePercent),
+          remarks,
           merchant_id: body.merchantId,
           partner_id: body.partnerId,
           status: body.status === "ACTIVE" ? "ACTIVE" : "PENDING",
@@ -539,9 +909,9 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         transactionDate: t.String({ minLength: 10, maxLength: 40 }),
         orderNumber: t.String({ minLength: 2, maxLength: 120 }),
         totalAmount: t.Number(),
-        myFeePercent: t.Optional(t.Union([t.Number(), t.String()])),
         customerFeePercent: t.Union([t.Number(), t.String()]),
         merchantFeePercent: t.Union([t.Number(), t.String()]),
+        remarks: t.Optional(t.String({ maxLength: 800 })),
         merchantId: t.String({ minLength: 10, maxLength: 60 }),
         partnerId: t.String({ minLength: 10, maxLength: 60 }),
         status: t.Optional(t.Union([t.Literal("PENDING"), t.Literal("ACTIVE")])),
@@ -568,6 +938,13 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         throw new Error("INVALID_TOTAL_AMOUNT");
       }
 
+      const remarks = (() => {
+        const raw = body.remarks ?? null;
+        if (raw == null) return null;
+        const v = raw.trim();
+        return v ? v : null;
+      })();
+
       const updated = await prisma.cashTransaction.updateMany({
         where: {
           id,
@@ -579,9 +956,9 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
           transaction_date: transactionDate,
           order_number: body.orderNumber.trim(),
           total_amount: totalAmount,
-          my_fee_bps: parseBpsFromPercentOptional(body.myFeePercent),
           customer_fee_bps: parseBpsFromPercent(body.customerFeePercent),
           merchant_fee_bps: parseBpsFromPercent(body.merchantFeePercent),
+          remarks,
           merchant_id: body.merchantId,
           partner_id: body.partnerId,
           status: body.status === "ACTIVE" ? "ACTIVE" : "PENDING",
@@ -602,9 +979,9 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         transactionDate: t.String({ minLength: 10, maxLength: 40 }),
         orderNumber: t.String({ minLength: 2, maxLength: 120 }),
         totalAmount: t.Number(),
-        myFeePercent: t.Optional(t.Union([t.Number(), t.String()])),
         customerFeePercent: t.Union([t.Number(), t.String()]),
         merchantFeePercent: t.Union([t.Number(), t.String()]),
+        remarks: t.Optional(t.String({ maxLength: 800 })),
         merchantId: t.String({ minLength: 10, maxLength: 60 }),
         partnerId: t.String({ minLength: 10, maxLength: 60 }),
         status: t.Optional(t.Union([t.Literal("PENDING"), t.Literal("ACTIVE")])),
@@ -625,8 +1002,52 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         q.group === "all"
           ? q.group
           : "day";
-      const from = parseIsoDate(q.from ?? null);
-      const to = parseIsoDate(q.to ?? null);
+      let from = parseIsoDate(q.from ?? null);
+      let to = parseIsoDate(q.to ?? null);
+
+      if (group !== "all" && group !== "datetime" && (!from || !to)) {
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+        const endOfDay = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+          23,
+          59,
+          59,
+          999,
+        );
+        const toWeekStart = (d: Date) => {
+          const day = (d.getDay() + 6) % 7;
+          const out = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+          out.setDate(out.getDate() - day);
+          return out;
+        };
+        const defaults =
+          group === "day"
+            ? { from: startOfDay, to: endOfDay }
+            : group === "week"
+              ? (() => {
+                  const s = toWeekStart(now);
+                  const e = new Date(s);
+                  e.setDate(s.getDate() + 6);
+                  e.setHours(23, 59, 59, 999);
+                  return { from: s, to: e };
+                })()
+              : group === "month"
+                ? (() => {
+                    const s = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+                    const e = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+                    return { from: s, to: e };
+                  })()
+                : (() => {
+                    const s = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+                    const e = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999);
+                    return { from: s, to: e };
+                  })();
+        from = from ?? defaults.from;
+        to = to ?? defaults.to;
+      }
 
       const bucketExpr =
         group === "all"
@@ -668,8 +1089,8 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
       >(Prisma.sql`
         SELECT
           ${bucketExpr} AS bucket,
-          SUM((ct.total_amount * (ct.my_fee_bps + ct.customer_fee_bps - ct.merchant_fee_bps)) / 10000) AS net_profit,
-          SUM((ct.total_amount * (ct.my_fee_bps + ct.customer_fee_bps)) / 10000) AS gross_profit,
+          SUM((ct.total_amount::bigint * (ct.customer_fee_bps - ct.merchant_fee_bps)::bigint) / 10000) AS net_profit,
+          SUM((ct.total_amount::bigint * ct.customer_fee_bps::bigint) / 10000) AS gross_profit,
           SUM(CASE WHEN ct.cash_type = 'CASH_IN' THEN ct.total_amount ELSE 0 END) AS cash_in,
           SUM(CASE WHEN ct.cash_type = 'CASH_OUT' THEN ct.total_amount ELSE 0 END) AS cash_out,
           SUM(CASE WHEN ct.status = 'PENDING' THEN ct.total_amount ELSE 0 END) AS pending_funds
@@ -722,11 +1143,20 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
         q.cashType === "CASH_IN" || q.cashType === "CASH_OUT"
           ? (q.cashType as "CASH_IN" | "CASH_OUT")
           : null;
+      const status =
+        q.status === "ALL" ||
+        q.status === "ACTIVE" ||
+        q.status === "PENDING" ||
+        q.status === "INACTIVE" ||
+        q.status === "DELETED"
+          ? q.status
+          : null;
 
       const rows = await fetchTransactions(authUser, {
         from,
         to,
         cashType,
+        status,
         search: q.search ?? null,
         merchantId: q.merchantId ?? null,
         partnerId: q.partnerId ?? null,
@@ -741,21 +1171,24 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
 
       if (format === "json") {
         const body = JSON.stringify(
-          rows.map((r) => ({
-            id: r.id,
-            status: r.status,
-            cashType: r.cash_type,
-            transactionDate: r.transaction_date.toISOString(),
-            orderNumber: r.order_number,
-            totalAmount: r.total_amount,
-            myFeePercent: r.my_fee_bps / 100,
-            customerFeePercent: r.customer_fee_bps / 100,
-            merchantFeePercent: r.merchant_fee_bps / 100,
-            merchant: r.merchant,
-            partner: r.partner,
-            grossProfit: computeGrossProfit(r),
-            netProfit: computeNetProfit(r),
-          })),
+          rows.map((r) => {
+            const amounts = exportAmounts(r);
+            return {
+              id: r.id,
+              date: r.transaction_date.toISOString().slice(0, 19).replace("T", " "),
+              type: cashTypeLabel(r.cash_type),
+              status: cashStatusLabel(r.status),
+              orderNumber: r.order_number,
+              partner: r.partner.name,
+              merchant: r.merchant.name,
+              base: r.total_amount,
+              customerFee: amounts.customerFeeAmount,
+              merchantFee: amounts.merchantFeeAmount,
+              net: amounts.netProfit,
+              fromMerchant: amounts.receiveFromMerchantAmount,
+              toCustomer: amounts.payToCustomerAmount,
+            };
+          }),
         );
         return new Response(body, {
           headers: {
@@ -767,35 +1200,36 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
 
       if (format === "csv") {
         const header = [
-          "transaction_date",
-          "cash_type",
+          "date",
+          "type",
           "status",
           "order_number",
           "partner",
           "merchant",
-          "total_amount",
-          "my_fee_percent",
-          "customer_fee_percent",
-          "merchant_fee_percent",
-          "gross_profit",
-          "net_profit",
+          "base",
+          "customer_fee",
+          "merchant_fee",
+          "net",
+          "from_merchant",
+          "to_customer",
         ].join(",");
         const body = [
           header,
           ...rows.map((r) => {
+            const amounts = exportAmounts(r);
             const fields = [
-              r.transaction_date.toISOString(),
-              r.cash_type,
-              r.status,
+              r.transaction_date.toISOString().slice(0, 19).replace("T", " "),
+              cashTypeLabel(r.cash_type),
+              cashStatusLabel(r.status),
               r.order_number,
               r.partner.name,
               r.merchant.name,
               String(r.total_amount),
-              (r.my_fee_bps / 100).toFixed(2),
-              (r.customer_fee_bps / 100).toFixed(2),
-              (r.merchant_fee_bps / 100).toFixed(2),
-              String(computeGrossProfit(r)),
-              String(computeNetProfit(r)),
+              String(amounts.customerFeeAmount),
+              String(amounts.merchantFeeAmount),
+              String(amounts.netProfit),
+              String(amounts.receiveFromMerchantAmount),
+              String(amounts.payToCustomerAmount),
             ].map((v) => escapeCsv(v));
             return fields.join(",");
           }),
@@ -811,22 +1245,21 @@ export const cashRoutes = new Elysia({ prefix: "/cash" })
       if (format === "xml") {
         const items = rows
           .map((r) => {
-            const gross = computeGrossProfit(r);
-            const net = computeNetProfit(r);
+            const amounts = exportAmounts(r);
             return `  <transaction>
     <id>${xmlEscape(r.id)}</id>
-    <transactionDate>${xmlEscape(r.transaction_date.toISOString())}</transactionDate>
-    <cashType>${xmlEscape(r.cash_type)}</cashType>
-    <status>${xmlEscape(r.status)}</status>
+    <date>${xmlEscape(r.transaction_date.toISOString().slice(0, 19).replace("T", " "))}</date>
+    <type>${xmlEscape(cashTypeLabel(r.cash_type))}</type>
+    <status>${xmlEscape(cashStatusLabel(r.status))}</status>
     <orderNumber>${xmlEscape(r.order_number)}</orderNumber>
     <partner>${xmlEscape(r.partner.name)}</partner>
     <merchant>${xmlEscape(r.merchant.name)}</merchant>
-    <totalAmount>${r.total_amount}</totalAmount>
-    <myFeePercent>${(r.my_fee_bps / 100).toFixed(2)}</myFeePercent>
-    <customerFeePercent>${(r.customer_fee_bps / 100).toFixed(2)}</customerFeePercent>
-    <merchantFeePercent>${(r.merchant_fee_bps / 100).toFixed(2)}</merchantFeePercent>
-    <grossProfit>${gross}</grossProfit>
-    <netProfit>${net}</netProfit>
+    <base>${r.total_amount}</base>
+    <customerFee>${amounts.customerFeeAmount}</customerFee>
+    <merchantFee>${amounts.merchantFeeAmount}</merchantFee>
+    <net>${amounts.netProfit}</net>
+    <fromMerchant>${amounts.receiveFromMerchantAmount}</fromMerchant>
+    <toCustomer>${amounts.payToCustomerAmount}</toCustomer>
   </transaction>`;
           })
           .join("\n");
@@ -845,12 +1278,49 @@ ${items}
       }
 
       if (format === "pdf") {
-        const lines = rows.slice(0, 50).map((r) => {
-          const gross = computeGrossProfit(r);
-          const net = computeNetProfit(r);
-          return `${r.transaction_date.toISOString().slice(0, 19)} ${r.cash_type} ${r.status} ${r.order_number} ${r.partner.name} / ${r.merchant.name} total=${r.total_amount} gross=${gross} net=${net}`;
+        const tzOffsetMinutes = (() => {
+          const raw = String((q as { tzOffsetMinutes?: string }).tzOffsetMinutes ?? "");
+          if (!raw.trim()) return 0;
+          const n = Number.parseInt(raw, 10);
+          return Number.isFinite(n) ? n : 0;
+        })();
+        const pad2 = (n: number) => String(n).padStart(2, "0");
+        const formatLocal = (d: Date) => {
+          const local = new Date(d.getTime() - tzOffsetMinutes * 60_000);
+          return `${local.getFullYear()}-${pad2(local.getMonth() + 1)}-${pad2(local.getDate())} ${pad2(local.getHours())}:${pad2(local.getMinutes())}`;
+        };
+        const header = [
+          "Date",
+          "Type",
+          "Status",
+          "Order",
+          "Partner",
+          "Merchant",
+          "Base",
+          "Cust Fee",
+          "Merch Fee",
+          "Net",
+          "From Merch",
+          "To Cust",
+        ];
+        const tableRows = rows.slice(0, 400).map((r) => {
+          const amounts = exportAmounts(r);
+          return [
+            formatLocal(r.transaction_date),
+            cashTypeLabel(r.cash_type),
+            cashStatusLabel(r.status),
+            r.order_number,
+            r.partner.name,
+            r.merchant.name,
+            String(r.total_amount),
+            String(amounts.customerFeeAmount),
+            String(amounts.merchantFeeAmount),
+            String(amounts.netProfit),
+            String(amounts.receiveFromMerchantAmount),
+            String(amounts.payToCustomerAmount),
+          ];
         });
-        const bytes = buildPdf("Cash In/Out Report", lines);
+        const bytes = buildPdf("Cash In/Out Report", header, tableRows);
         return new Response(bytes, {
           headers: {
             "content-type": "application/pdf",
@@ -883,12 +1353,22 @@ ${items}
         ]),
         from: t.Optional(t.String()),
         to: t.Optional(t.String()),
+        tzOffsetMinutes: t.Optional(t.String()),
         cashType: t.Optional(t.Union([t.Literal("CASH_IN"), t.Literal("CASH_OUT")])),
         search: t.Optional(t.String()),
         merchantId: t.Optional(t.String()),
         partnerId: t.Optional(t.String()),
         merchantName: t.Optional(t.String()),
         partnerName: t.Optional(t.String()),
+        status: t.Optional(
+          t.Union([
+            t.Literal("ALL"),
+            t.Literal("ACTIVE"),
+            t.Literal("PENDING"),
+            t.Literal("INACTIVE"),
+            t.Literal("DELETED"),
+          ]),
+        ),
       }),
     },
   );

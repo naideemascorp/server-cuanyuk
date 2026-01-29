@@ -2,6 +2,9 @@
   "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
   "files": { "ignore": ["node_modules/**", "prisma/migrations/**"] },
   "organizeImports": { "enabled": true },
-  "linter": { "enabled": true, "rules": { "recommended": true } },
+  "linter": {
+    "enabled": true,
+    "rules": { "recommended": true, "suspicious": { "noExplicitAny": "error" } }
+  },
   "formatter": { "enabled": true, "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 }
 }
