@@ -62,8 +62,8 @@ const computeCookiePolicy = (appPublicBaseUrl: string, serverPublicBaseUrl: stri
 };
 
 export const config = {
-  databaseUrl: required("DATABASE_URL"),
-  databaseSchema: process.env.DATABASE_SCHEMA ?? "public",
+  supabaseUrl: required("SUPABASE_URL"),
+  supabaseServiceRoleKey: required("SUPABASE_SERVICE_ROLE_KEY"),
   appPublicBaseUrl: required("APP_PUBLIC_BASE_URL"),
   serverPublicBaseUrl: required("SERVER_PUBLIC_BASE_URL"),
   corsOrigins: computeCorsOrigins(required("APP_PUBLIC_BASE_URL")),

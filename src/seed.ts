@@ -1,5 +1,5 @@
 import { hashPassword } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 
 const run = async () => {
   const ips = ["127.0.0.1", "::1"];
@@ -7,11 +7,12 @@ const run = async () => {
   if (extra) ips.push(extra);
 
   for (const ip of ips) {
-    await prisma.iPWhitelist.upsert({
-      where: { ip },
-      update: { status: "ACTIVE", updated_by: "system" },
-      create: { ip, note: "seed", status: "ACTIVE", created_by: "system", updated_by: "system" },
-    });
+    await supabase
+      .from("ip_whitelist")
+      .upsert(
+        { ip, note: "seed", status: "ACTIVE", created_by: "system", updated_by: "system" },
+        { onConflict: "ip" },
+      );
   }
 
   const shouldCreateTestUser =
@@ -23,61 +24,74 @@ const run = async () => {
   const testEmail = process.env.SEED_SUPER_EMAIL?.trim() || "testingaccount@cuanyuk.com";
   const testPassword = "helloworld26";
 
-  const organization =
-    (await prisma.organization.findFirst({
-      where: { status: "ACTIVE" },
-      orderBy: { created_date: "asc" },
-    })) ??
-    (await prisma.organization.create({
-      data: {
+  const { data: existingOrg } = await supabase
+    .from("organizations")
+    .select("*")
+    .eq("status", "ACTIVE")
+    .order("created_date", { ascending: true })
+    .limit(1)
+    .maybeSingle();
+
+  let organization = existingOrg;
+  if (!organization) {
+    const { data: newOrg } = await supabase
+      .from("organizations")
+      .insert({
         display_name: "Workspace",
         status: "ACTIVE",
         created_by: "system",
         updated_by: "system",
-      },
-    }));
+      })
+      .select()
+      .single();
+    organization = newOrg;
+  }
+  if (!organization) throw new Error("Failed to create organization");
 
   const passwordHash = await hashPassword(testPassword);
 
-  const existing = await prisma.user.findFirst({
-    where: { organization_id: organization.id, username: testUsername },
-    select: { id: true },
-  });
+  const { data: existing } = await supabase
+    .from("users")
+    .select("id")
+    .eq("organization_id", organization.id)
+    .eq("username", testUsername)
+    .limit(1)
+    .maybeSingle();
 
   if (existing) {
-    await prisma.user.update({
-      where: { id: existing.id },
-      data: {
+    await supabase
+      .from("users")
+      .update({
         email: testEmail,
         password_hash: passwordHash,
-        email_verified_at: new Date(),
+        email_verified_at: new Date().toISOString(),
         status: "ACTIVE",
         role: "SUPER",
         updated_by: "system",
-      },
-    });
+      })
+      .eq("id", existing.id);
     return;
   }
 
-  await prisma.user.create({
-    data: {
-      organization_id: organization.id,
-      username: testUsername,
-      email: testEmail,
-      password_hash: passwordHash,
-      email_verified_at: new Date(),
-      status: "ACTIVE",
-      role: "SUPER",
-      created_by: "system",
-      updated_by: "system",
-    },
+  await supabase.from("users").insert({
+    organization_id: organization.id,
+    username: testUsername,
+    email: testEmail,
+    password_hash: passwordHash,
+    email_verified_at: new Date().toISOString(),
+    status: "ACTIVE",
+    role: "SUPER",
+    created_by: "system",
+    updated_by: "system",
   });
 };
 
 run()
-  .then(async () => prisma.$disconnect())
-  .catch(async (e) => {
+  .then(() => {
+    console.log("Seed complete");
+    process.exit(0);
+  })
+  .catch((e) => {
     console.error(e);
-    await prisma.$disconnect();
     process.exit(1);
   });

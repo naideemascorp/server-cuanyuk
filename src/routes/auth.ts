@@ -3,14 +3,14 @@ import { config } from "@/config";
 import { hashPassword, verifyPassword } from "@/lib/auth";
 import { getDeviceIdFromContext } from "@/lib/device";
 import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 import { signSessionToken } from "@/lib/token";
 import { Elysia, t } from "elysia";
 
 const oneDayMs = 24 * 60 * 60 * 1000;
-const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
+const withTimeout = async <T>(fn: () => PromiseLike<T>, ms: number): Promise<T> => {
   return await Promise.race([
-    promise,
+    Promise.resolve(fn()),
     new Promise<T>((_, reject) => setTimeout(() => reject(new Error("TIMEOUT")), ms)),
   ]);
 };
@@ -195,13 +195,22 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
     const deviceId = getDeviceIdFromContext(ctx);
     try {
-      const hasAnyUser = await withTimeout(prisma.user.findFirst({ select: { id: true } }), 1200);
+      const { data: hasAnyUser } = await withTimeout(
+        () => supabase.from("users").select("id").limit(1).maybeSingle(),
+        1200,
+      );
       const bootstrap = !hasAnyUser;
       if (bootstrap) return { allowed: true, deviceId };
       if (!deviceId) return { allowed: false, deviceId: null };
 
-      const whitelisted = await withTimeout(
-        prisma.deviceWhitelist.findFirst({ where: { device_id: deviceId, status: "ACTIVE" } }),
+      const { data: whitelisted } = await withTimeout(
+        () => supabase
+          .from("device_whitelist")
+          .select("id")
+          .eq("device_id", deviceId)
+          .eq("status", "ACTIVE")
+          .limit(1)
+          .maybeSingle(),
         1200,
       );
       return { allowed: Boolean(whitelisted), deviceId };
@@ -223,16 +232,23 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       let whitelisted: { organization_id: string | null } | null = null;
       let bootstrap = false;
       try {
-        const hasAnyUser = await withTimeout(prisma.user.findFirst({ select: { id: true } }), 1200);
+        const { data: hasAnyUser } = await withTimeout(
+          () => supabase.from("users").select("id").limit(1).maybeSingle(),
+          1200,
+        );
         bootstrap = !hasAnyUser;
         if (!bootstrap) {
-          whitelisted = await withTimeout(
-            prisma.deviceWhitelist.findFirst({
-              where: { device_id: deviceId, status: "ACTIVE" },
-              select: { organization_id: true },
-            }),
+          const { data } = await withTimeout(
+            () => supabase
+              .from("device_whitelist")
+              .select("organization_id")
+              .eq("device_id", deviceId)
+              .eq("status", "ACTIVE")
+              .limit(1)
+              .maybeSingle(),
             1200,
           );
+          whitelisted = data;
         } else {
           whitelisted = { organization_id: null };
         }
@@ -245,47 +261,58 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         return { ok: false, code: "SIGNUP_DEVICE_NOT_ALLOWED" };
       }
 
-      const existingOrg = whitelisted.organization_id
-        ? await prisma.organization.findFirst({
-            where: { id: whitelisted.organization_id, status: "ACTIVE" },
-          })
-        : null;
+      let organization: { id: string } | null = null;
+      if (whitelisted.organization_id) {
+        const { data: existingOrg } = await supabase
+          .from("organizations")
+          .select("*")
+          .eq("id", whitelisted.organization_id)
+          .eq("status", "ACTIVE")
+          .limit(1)
+          .maybeSingle();
+        organization = existingOrg;
+      }
 
-      const organization =
-        existingOrg ??
-        (await prisma.organization.create({
-          data: {
+      if (!organization) {
+        const { data: newOrg } = await supabase
+          .from("organizations")
+          .insert({
             display_name: "Workspace",
             created_by: "system",
             updated_by: "system",
-          },
-        }));
+          })
+          .select()
+          .single();
+        organization = newOrg;
+      }
+      if (!organization) {
+        set.status = 500;
+        return { ok: false, code: "ORG_CREATION_FAILED" };
+      }
 
       if (bootstrap) {
-        await prisma.deviceWhitelist.upsert({
-          where: { device_id: deviceId },
-          create: {
-            device_id: deviceId,
-            status: "ACTIVE",
-            organization_id: organization.id,
-            note: "Bootstrap device",
-            created_by: "system",
-            updated_by: "system",
-          },
-          update: {
-            status: "ACTIVE",
-            organization_id: organization.id,
-            updated_by: "system",
-          },
-        });
+        await supabase
+          .from("device_whitelist")
+          .upsert(
+            {
+              device_id: deviceId,
+              status: "ACTIVE",
+              organization_id: organization.id,
+              note: "Bootstrap device",
+              created_by: "system",
+              updated_by: "system",
+            },
+            { onConflict: "device_id" },
+          );
       }
 
       const username = body.username.trim();
       const email = body.email.trim().toLowerCase();
       const passwordHash = await hashPassword(body.password);
 
-      const user = await prisma.user.create({
-        data: {
+      const { data: user } = await supabase
+        .from("users")
+        .insert({
           organization_id: organization.id,
           username,
           email,
@@ -293,21 +320,24 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
           status: "PENDING",
           created_by: "system",
           updated_by: "system",
-        },
-      });
+        })
+        .select()
+        .single();
+      if (!user) {
+        set.status = 500;
+        return { ok: false, code: "USER_CREATION_FAILED" };
+      }
 
       const token = randomBytes(32).toString("hex");
-      const expiresAt = new Date(Date.now() + oneDayMs);
+      const expiresAt = new Date(Date.now() + oneDayMs).toISOString();
 
-      await prisma.emailVerificationToken.create({
-        data: {
-          user_id: user.id,
-          token,
-          expires_at: expiresAt,
-          status: "ACTIVE",
-          created_by: user.id,
-          updated_by: user.id,
-        },
+      await supabase.from("email_verification_tokens").insert({
+        user_id: user.id,
+        token,
+        expires_at: expiresAt,
+        status: "ACTIVE",
+        created_by: user.id,
+        updated_by: user.id,
       });
 
       const verifyUrl = `${config.appPublicBaseUrl}/verify-email?token=${token}`;
@@ -328,10 +358,13 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     "/verify-email",
     async ({ query, set }) => {
       const token = query.token.trim();
-      const row = await prisma.emailVerificationToken.findFirst({
-        where: { token, status: "ACTIVE" },
-        include: { user: true },
-      });
+      const { data: row } = await supabase
+        .from("email_verification_tokens")
+        .select("*, user:users(*)")
+        .eq("token", token)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (!row) {
         set.status = 400;
         return { ok: false, code: "TOKEN_INVALID" };
@@ -339,25 +372,24 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       if (row.consumed_at) {
         return { ok: true, alreadyVerified: true };
       }
-      if (row.expires_at.getTime() < Date.now()) {
-        await prisma.emailVerificationToken.update({
-          where: { id: row.id },
-          data: { status: "INACTIVE", updated_by: "system" },
-        });
+      if (new Date(row.expires_at).getTime() < Date.now()) {
+        await supabase
+          .from("email_verification_tokens")
+          .update({ status: "INACTIVE", updated_by: "system" })
+          .eq("id", row.id);
         set.status = 400;
         return { ok: false, code: "TOKEN_EXPIRED" };
       }
 
-      await prisma.$transaction([
-        prisma.emailVerificationToken.update({
-          where: { id: row.id },
-          data: { consumed_at: new Date(), status: "INACTIVE", updated_by: "system" },
-        }),
-        prisma.user.update({
-          where: { id: row.user_id },
-          data: { email_verified_at: new Date(), status: "ACTIVE", updated_by: "system" },
-        }),
-      ]);
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from("email_verification_tokens")
+        .update({ consumed_at: nowIso, status: "INACTIVE", updated_by: "system" })
+        .eq("id", row.id);
+      await supabase
+        .from("users")
+        .update({ email_verified_at: nowIso, status: "ACTIVE", updated_by: "system" })
+        .eq("id", row.user_id);
 
       return { ok: true };
     },
@@ -378,12 +410,35 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const username = identifierRaw;
       const usernameLower = identifierRaw.toLowerCase();
 
-      const user = await prisma.user.findFirst({
-        where: {
-          OR: [{ email }, { username }, { username: usernameLower }],
-        },
-        select: { id: true, email: true, status: true },
-      });
+
+      let user: { id: string; email: string; status: string } | null = null;
+      const { data: byEmail } = email
+        ? await supabase
+          .from("users")
+          .select("id, email, status")
+          .eq("email", email)
+          .limit(1)
+          .maybeSingle()
+        : { data: null };
+      user = byEmail;
+      if (!user) {
+        const { data: byUsername } = await supabase
+          .from("users")
+          .select("id, email, status")
+          .eq("username", username)
+          .limit(1)
+          .maybeSingle();
+        user = byUsername;
+      }
+      if (!user) {
+        const { data: byUsernameLower } = await supabase
+          .from("users")
+          .select("id, email, status")
+          .eq("username", usernameLower)
+          .limit(1)
+          .maybeSingle();
+        user = byUsernameLower;
+      }
       if (user?.status !== "ACTIVE") {
         set.status = 404;
         return { ok: false, code: "USER_NOT_FOUND" };
@@ -392,22 +447,26 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const now = Date.now();
       const startOfDay = new Date();
       startOfDay.setHours(0, 0, 0, 0);
-      const sentToday = await prisma.passwordResetToken.count({
-        where: { user_id: user.id, created_date: { gte: startOfDay } },
-      });
-      if (sentToday >= 3) {
+      const { count: sentToday } = await supabase
+        .from("password_reset_tokens")
+        .select("id", { count: "exact", head: true })
+        .eq("user_id", user.id)
+        .gte("created_date", startOfDay.toISOString());
+      if ((sentToday ?? 0) >= 3) {
         const retryAt = new Date(startOfDay.getTime() + oneDayMs);
         set.status = 429;
         return { ok: false, code: "RESEND_LIMIT", retryAt: retryAt.toISOString() };
       }
 
-      const last = await prisma.passwordResetToken.findFirst({
-        where: { user_id: user.id },
-        orderBy: { created_date: "desc" },
-        select: { created_date: true },
-      });
+      const { data: last } = await supabase
+        .from("password_reset_tokens")
+        .select("created_date")
+        .eq("user_id", user.id)
+        .order("created_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
       if (last) {
-        const nextAllowedAt = last.created_date.getTime() + 60_000;
+        const nextAllowedAt = new Date(last.created_date).getTime() + 60_000;
         if (now < nextAllowedAt) {
           set.status = 429;
           return {
@@ -419,23 +478,20 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       }
 
       const token = randomBytes(32).toString("hex");
-      const expiresAt = new Date(now + oneDayMs);
-      await prisma.$transaction([
-        prisma.passwordResetToken.updateMany({
-          where: { user_id: user.id, status: "ACTIVE" },
-          data: { status: "INACTIVE", updated_by: "system" },
-        }),
-        prisma.passwordResetToken.create({
-          data: {
-            user_id: user.id,
-            token,
-            expires_at: expiresAt,
-            status: "ACTIVE",
-            created_by: user.id,
-            updated_by: user.id,
-          },
-        }),
-      ]);
+      const expiresAt = new Date(now + oneDayMs).toISOString();
+      await supabase
+        .from("password_reset_tokens")
+        .update({ status: "INACTIVE", updated_by: "system" })
+        .eq("user_id", user.id)
+        .eq("status", "ACTIVE");
+      await supabase.from("password_reset_tokens").insert({
+        user_id: user.id,
+        token,
+        expires_at: expiresAt,
+        status: "ACTIVE",
+        created_by: user.id,
+        updated_by: user.id,
+      });
 
       const resetUrl = `${config.appPublicBaseUrl}/reset-password/${token}`;
       await sendPasswordResetEmail(user.email, resetUrl);
@@ -444,7 +500,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       return {
         ok: true,
         nextAllowedAt: new Date(Date.now() + 60_000).toISOString(),
-        remainingToday: Math.max(0, 3 - (sentToday + 1)),
+        remainingToday: Math.max(0, 3 - ((sentToday ?? 0) + 1)),
       };
     },
     {
@@ -466,39 +522,41 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
         return { ok: false, code: "INVALID_INPUT" };
       }
 
-      const row = await prisma.passwordResetToken.findFirst({
-        where: { token, status: "ACTIVE" },
-        include: { user: true },
-      });
+      const { data: row } = await supabase
+        .from("password_reset_tokens")
+        .select("*, user:users(*)")
+        .eq("token", token)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (!row || row.consumed_at) {
         set.status = 400;
         return { ok: false, code: "TOKEN_INVALID" };
       }
-      if (row.expires_at.getTime() < Date.now()) {
-        await prisma.passwordResetToken.update({
-          where: { id: row.id },
-          data: { status: "INACTIVE", updated_by: "system" },
-        });
+      if (new Date(row.expires_at).getTime() < Date.now()) {
+        await supabase
+          .from("password_reset_tokens")
+          .update({ status: "INACTIVE", updated_by: "system" })
+          .eq("id", row.id);
         set.status = 400;
         return { ok: false, code: "TOKEN_EXPIRED" };
       }
 
       const passwordHash = await hashPassword(newPassword);
-      const now = new Date();
-      await prisma.$transaction([
-        prisma.passwordResetToken.update({
-          where: { id: row.id },
-          data: { consumed_at: now, status: "INACTIVE", updated_by: "system" },
-        }),
-        prisma.user.update({
-          where: { id: row.user_id },
-          data: { password_hash: passwordHash, updated_by: "system" },
-        }),
-        prisma.session.updateMany({
-          where: { user_id: row.user_id, status: "ACTIVE" },
-          data: { status: "INACTIVE", revoked_at: now, updated_by: "system" },
-        }),
-      ]);
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from("password_reset_tokens")
+        .update({ consumed_at: nowIso, status: "INACTIVE", updated_by: "system" })
+        .eq("id", row.id);
+      await supabase
+        .from("users")
+        .update({ password_hash: passwordHash, updated_by: "system" })
+        .eq("id", row.user_id);
+      await supabase
+        .from("sessions")
+        .update({ status: "INACTIVE", revoked_at: nowIso, updated_by: "system" })
+        .eq("user_id", row.user_id)
+        .eq("status", "ACTIVE");
 
       return { ok: true };
     },
@@ -538,19 +596,44 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       const email = identifierRaw.toLowerCase();
       const username = identifierRaw;
       const usernameLower = identifierRaw.toLowerCase();
-      const user = await prisma.user.findFirst({
-        where: { OR: [{ email }, { username }, { username: usernameLower }] },
-        select: {
-          id: true,
-          email_verified_at: true,
-          status: true,
-          password_hash: true,
-          organization_id: true,
-          username: true,
-          email: true,
-          role: true,
-        },
-      });
+
+
+      type UserRow = {
+        id: string;
+        email_verified_at: string | null;
+        status: string;
+        password_hash: string;
+        organization_id: string;
+        username: string;
+        email: string;
+        role: string;
+      };
+      let user: UserRow | null = null;
+      const { data: byEmail } = await supabase
+        .from("users")
+        .select("id, email_verified_at, status, password_hash, organization_id, username, email, role")
+        .eq("email", email)
+        .limit(1)
+        .maybeSingle();
+      user = byEmail;
+      if (!user) {
+        const { data: byUsername } = await supabase
+          .from("users")
+          .select("id, email_verified_at, status, password_hash, organization_id, username, email, role")
+          .eq("username", username)
+          .limit(1)
+          .maybeSingle();
+        user = byUsername;
+      }
+      if (!user) {
+        const { data: byUsernameLower } = await supabase
+          .from("users")
+          .select("id, email_verified_at, status, password_hash, organization_id, username, email, role")
+          .eq("username", usernameLower)
+          .limit(1)
+          .maybeSingle();
+        user = byUsernameLower;
+      }
       if (!user) {
         set.status = 401;
         return { ok: false, code: "USER_NOT_FOUND" };
@@ -571,15 +654,13 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
       const jwtId = randomUUID();
       const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
-      await prisma.session.create({
-        data: {
-          user_id: user.id,
-          jwt_id: jwtId,
-          expires_at: expiresAt,
-          status: "ACTIVE",
-          created_by: user.id,
-          updated_by: user.id,
-        },
+      await supabase.from("sessions").insert({
+        user_id: user.id,
+        jwt_id: jwtId,
+        expires_at: expiresAt.toISOString(),
+        status: "ACTIVE",
+        created_by: user.id,
+        updated_by: user.id,
       });
 
       const token = await signSessionToken(

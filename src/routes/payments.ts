@@ -1,5 +1,5 @@
 import { config } from "@/config";
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 import type { AuthUser } from "@/lib/types";
 import { wsRegistry } from "@/lib/ws";
 import { Elysia, t } from "elysia";
@@ -7,7 +7,7 @@ import { Elysia, t } from "elysia";
 const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
   if (!value || value.trim() === "") {
     if (!defaultsToMinutes) return null;
-    return new Date(Date.now() + defaultsToMinutes * 60 * 1000);
+    return new Date(Date.now() + defaultsToMinutes * 60 * 1000).toISOString();
   }
   const v = value.trim().toLowerCase();
   if (v === "lifetime" || v === "none") return null;
@@ -16,7 +16,7 @@ const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {
   const n = Number(m[1]);
   const unit = m[2];
   const ms = unit === "m" ? n * 60_000 : unit === "h" ? n * 3_600_000 : n * 86_400_000;
-  return new Date(Date.now() + ms);
+  return new Date(Date.now() + ms).toISOString();
 };
 
 const sniffExt = (bytes: Uint8Array) => {
@@ -45,23 +45,21 @@ const extToMime = (ext: string) => {
 export const paymentRoutes = new Elysia({ prefix: "/payments" })
   .get("/all", async (ctx) => {
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-    const items = await prisma.paymentItem.findMany({
-      where: { organization_id: authUser.organizationId, status: { in: ["ACTIVE", "INACTIVE"] } },
-      orderBy: [{ created_date: "desc" }],
-      select: {
-        id: true,
-        kind: true,
-        status: true,
-        total_amount: true,
-        payment_url: true,
-        qris_path: true,
-        qris_mime: true,
-        expires_at: true,
-        created_date: true,
-        merchant: { select: { id: true, name: true, category: true } },
-      },
-    });
-    const rows = items as Array<{
+    const { data: items } = await supabase
+      .from("payment_items")
+      .select("id, kind, status, total_amount, payment_url, qris_path, qris_mime, expires_at, created_date, merchant_id")
+      .eq("organization_id", authUser.organizationId)
+      .in("status", ["ACTIVE", "INACTIVE"])
+      .order("created_date", { ascending: false });
+
+    const itemRows = items ?? [];
+    const merchantIds = [...new Set(itemRows.map((i: { merchant_id: string }) => i.merchant_id))];
+    const { data: merchantsData } = merchantIds.length
+      ? await supabase.from("merchants").select("id, name, category").in("id", merchantIds)
+      : { data: [] };
+    const merchantMap = new Map((merchantsData ?? []).map((m: { id: string; name: string; category: string }) => [m.id, m]));
+
+    const rows = itemRows as Array<{
       id: string;
       kind: "LINK" | "QRIS";
       status: string;
@@ -69,44 +67,45 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       payment_url: string | null;
       qris_path: string | null;
       qris_mime: string | null;
-      expires_at: Date | null;
-      created_date: Date;
-      merchant: { id: string; name: string; category: string };
+      expires_at: string | null;
+      created_date: string;
+      merchant_id: string;
     }>;
     return {
-      items: rows.map((i) => ({
-        id: i.id,
-        kind: i.kind,
-        status: i.status,
-        totalAmount: i.total_amount,
-        paymentUrl: i.payment_url,
-        qrisUrl:
-          i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
-        expiresAt: i.expires_at,
-        createdDate: i.created_date,
-        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
-      })),
+      items: rows.map((i) => {
+        const merchant = merchantMap.get(i.merchant_id) ?? { id: i.merchant_id, name: "", category: "" };
+        return {
+          id: i.id,
+          kind: i.kind,
+          status: i.status,
+          totalAmount: i.total_amount,
+          paymentUrl: i.payment_url,
+          qrisUrl:
+            i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
+          expiresAt: i.expires_at,
+          createdDate: i.created_date,
+          merchant: { id: merchant.id, name: merchant.name, category: merchant.category },
+        };
+      }),
     };
   })
   .get("/active", async (ctx) => {
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-    const items = await prisma.paymentItem.findMany({
-      where: { organization_id: authUser.organizationId, status: "ACTIVE" },
-      orderBy: [{ created_date: "desc" }],
-      select: {
-        id: true,
-        kind: true,
-        status: true,
-        total_amount: true,
-        payment_url: true,
-        qris_path: true,
-        qris_mime: true,
-        expires_at: true,
-        created_date: true,
-        merchant: { select: { id: true, name: true, category: true } },
-      },
-    });
-    const rows = items as Array<{
+    const { data: items } = await supabase
+      .from("payment_items")
+      .select("id, kind, status, total_amount, payment_url, qris_path, qris_mime, expires_at, created_date, merchant_id")
+      .eq("organization_id", authUser.organizationId)
+      .eq("status", "ACTIVE")
+      .order("created_date", { ascending: false });
+
+    const itemRows = items ?? [];
+    const merchantIds = [...new Set(itemRows.map((i: { merchant_id: string }) => i.merchant_id))];
+    const { data: merchantsData } = merchantIds.length
+      ? await supabase.from("merchants").select("id, name, category").in("id", merchantIds)
+      : { data: [] };
+    const merchantMap = new Map((merchantsData ?? []).map((m: { id: string; name: string; category: string }) => [m.id, m]));
+
+    const rows = itemRows as Array<{
       id: string;
       kind: "LINK" | "QRIS";
       status: string;
@@ -114,23 +113,26 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       payment_url: string | null;
       qris_path: string | null;
       qris_mime: string | null;
-      expires_at: Date | null;
-      created_date: Date;
-      merchant: { id: string; name: string; category: string };
+      expires_at: string | null;
+      created_date: string;
+      merchant_id: string;
     }>;
     return {
-      items: rows.map((i) => ({
-        id: i.id,
-        kind: i.kind,
-        status: i.status,
-        totalAmount: i.total_amount,
-        paymentUrl: i.payment_url,
-        qrisUrl:
-          i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
-        expiresAt: i.expires_at,
-        createdDate: i.created_date,
-        merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
-      })),
+      items: rows.map((i) => {
+        const merchant = merchantMap.get(i.merchant_id) ?? { id: i.merchant_id, name: "", category: "" };
+        return {
+          id: i.id,
+          kind: i.kind,
+          status: i.status,
+          totalAmount: i.total_amount,
+          paymentUrl: i.payment_url,
+          qrisUrl:
+            i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
+          expiresAt: i.expires_at,
+          createdDate: i.created_date,
+          merchant: { id: merchant.id, name: merchant.name, category: merchant.category },
+        };
+      }),
     };
   })
   .post(
@@ -140,8 +142,9 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       const body = ctx.body;
       const set = ctx.set;
       const expiresAt = parseExpiry(body.expiration ?? null, 12 * 60);
-      const item = await prisma.paymentItem.create({
-        data: {
+      const { data: item } = await supabase
+        .from("payment_items")
+        .insert({
           organization_id: authUser.organizationId,
           merchant_id: body.merchantId,
           kind: "LINK",
@@ -150,11 +153,12 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
           expires_at: expiresAt,
           created_by: authUser.userId,
           updated_by: authUser.userId,
-        },
-      });
+        })
+        .select("id")
+        .single();
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 201;
-      return { id: item.id };
+      return { id: item?.id };
     },
     {
       body: t.Object({
@@ -177,26 +181,27 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       if (bytes.length > 3_000_000) throw new Error("IMAGE_TOO_LARGE");
       const ext = sniffExt(bytes);
       const mime = extToMime(ext);
-      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
-      const data = new Uint8Array(ab);
+      const hexData = `\\x${Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
 
-      const item = await prisma.paymentItem.create({
-        data: {
+      const { data: item } = await supabase
+        .from("payment_items")
+        .insert({
           organization_id: authUser.organizationId,
           merchant_id: body.merchantId,
           kind: "QRIS",
           qris_path: null,
           qris_mime: mime,
-          qris_data: data,
+          qris_data: hexData,
           total_amount: Math.max(0, Math.trunc(body.totalAmount)),
           expires_at: expiresAt,
           created_by: authUser.userId,
           updated_by: authUser.userId,
-        },
-      });
+        })
+        .select("id")
+        .single();
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 201;
-      return { id: item.id };
+      return { id: item?.id };
     },
     {
       body: t.Object({
@@ -213,10 +218,11 @@ export const paymentRoutes = new Elysia({ prefix: "/payments" })
       const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
       const params = ctx.params;
       const set = ctx.set;
-      await prisma.paymentItem.updateMany({
-        where: { id: params.id, organization_id: authUser.organizationId },
-        data: { status: "INACTIVE", inactivated_at: new Date(), updated_by: authUser.userId },
-      });
+      await supabase
+        .from("payment_items")
+        .update({ status: "INACTIVE", inactivated_at: new Date().toISOString(), updated_by: authUser.userId })
+        .eq("id", params.id)
+        .eq("organization_id", authUser.organizationId);
       wsRegistry.broadcast({ type: "items:changed" });
       set.status = 204;
     },

@@ -1,29 +1,28 @@
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 import type { AuthUser } from "@/lib/types";
 import { Elysia, t } from "elysia";
 
 export const categoryRoutes = new Elysia({ prefix: "/categories" })
   .get("/", async (ctx) => {
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-    const [cats, merchants] = await Promise.all([
-      prisma.category.findMany({
-        where: {
-          organization_id: authUser.organizationId,
-          status: "ACTIVE",
-          NOT: { name: "Cash In/Out" },
-        },
-        orderBy: [{ name: "asc" }],
-        select: { id: true, name: true },
-      }),
-      prisma.merchant.findMany({
-        where: {
-          organization_id: authUser.organizationId,
-          status: "ACTIVE",
-          NOT: { category: "Cash In/Out" },
-        },
-        select: { category: true },
-      }),
+    const [catsResult, merchantsResult] = await Promise.all([
+      supabase
+        .from("categories")
+        .select("id, name")
+        .eq("organization_id", authUser.organizationId)
+        .eq("status", "ACTIVE")
+        .neq("name", "Cash In/Out")
+        .order("name", { ascending: true }),
+      supabase
+        .from("merchants")
+        .select("category")
+        .eq("organization_id", authUser.organizationId)
+        .eq("status", "ACTIVE")
+        .neq("category", "Cash In/Out"),
     ]);
+
+    const cats = catsResult.data ?? [];
+    const merchants = merchantsResult.data ?? [];
 
     const merged = new Map<string, { id: string | null; name: string }>();
     for (const c of cats) merged.set(c.name, { id: c.id, name: c.name });
@@ -43,18 +42,20 @@ export const categoryRoutes = new Elysia({ prefix: "/categories" })
       const body = ctx.body;
       const set = ctx.set;
       const name = body.name.trim();
-      const created = await prisma.category.upsert({
-        where: { organization_id_name: { organization_id: authUser.organizationId, name } },
-        create: {
-          organization_id: authUser.organizationId,
-          name,
-          status: "ACTIVE",
-          created_by: authUser.userId,
-          updated_by: authUser.userId,
-        },
-        update: { status: "ACTIVE", updated_by: authUser.userId },
-        select: { id: true, name: true },
-      });
+      const { data: created } = await supabase
+        .from("categories")
+        .upsert(
+          {
+            organization_id: authUser.organizationId,
+            name,
+            status: "ACTIVE",
+            created_by: authUser.userId,
+            updated_by: authUser.userId,
+          },
+          { onConflict: "organization_id,name" },
+        )
+        .select("id, name")
+        .single();
       set.status = 201;
       return { category: created };
     },

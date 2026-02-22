@@ -1,6 +1,5 @@
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 import type { AuthUser } from "@/lib/types";
-import type { Prisma } from "@prisma/client";
 import { Elysia, t } from "elysia";
 
 export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
@@ -13,10 +12,14 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         set.status = 401;
         return { ok: false, code: "UNAUTHORIZED" };
       }
-      const user = await prisma.user.findFirst({
-        where: { id: u.userId, organization_id: u.organizationId, status: "ACTIVE" },
-        select: { role: true },
-      });
+      const { data: user } = await supabase
+        .from("users")
+        .select("role")
+        .eq("id", u.userId)
+        .eq("organization_id", u.organizationId)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (user?.role !== "SUPER") {
         set.status = 403;
         return { ok: false, code: "FORBIDDEN" };
@@ -27,17 +30,18 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
     app
       .get("/access", async () => ({ ok: true }))
       .get("/ips", async () => {
-        const entries = await prisma.iPWhitelist.findMany({
-          orderBy: [{ updated_date: "desc" }],
-          take: 200,
-        });
-        const rows = entries as Array<{
+        const { data: entries } = await supabase
+          .from("ip_whitelist")
+          .select("id, ip, note, status, created_date, updated_date")
+          .order("updated_date", { ascending: false })
+          .limit(200);
+        const rows = (entries ?? []) as Array<{
           id: string;
           ip: string;
           note: string | null;
           status: string;
-          created_date: Date;
-          updated_date: Date;
+          created_date: string;
+          updated_date: string;
         }>;
         return {
           entries: rows.map((e) => ({
@@ -60,17 +64,20 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
           const note = body.note?.trim() || null;
           const status = body.status;
 
-          const saved = await prisma.iPWhitelist.upsert({
-            where: { ip },
-            create: {
-              ip,
-              note,
-              status,
-              created_by: authUser.userId,
-              updated_by: authUser.userId,
-            },
-            update: { note, status, updated_by: authUser.userId },
-          });
+          const { data: saved } = await supabase
+            .from("ip_whitelist")
+            .upsert(
+              {
+                ip,
+                note,
+                status,
+                created_by: authUser.userId,
+                updated_by: authUser.userId,
+              },
+              { onConflict: "ip" },
+            )
+            .select()
+            .single();
           set.status = 201;
           return { entry: saved };
         },
@@ -83,17 +90,18 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         },
       )
       .get("/devices", async () => {
-        const entries = await prisma.deviceWhitelist.findMany({
-          orderBy: [{ updated_date: "desc" }],
-          take: 200,
-        });
-        const rows = entries as Array<{
+        const { data: entries } = await supabase
+          .from("device_whitelist")
+          .select("id, device_id, note, status, created_date, updated_date")
+          .order("updated_date", { ascending: false })
+          .limit(200);
+        const rows = (entries ?? []) as Array<{
           id: string;
           device_id: string;
           note: string | null;
           status: string;
-          created_date: Date;
-          updated_date: Date;
+          created_date: string;
+          updated_date: string;
         }>;
         return {
           entries: rows.map((e) => ({
@@ -116,17 +124,20 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
           const note = body.note?.trim() || null;
           const status = body.status;
 
-          const saved = await prisma.deviceWhitelist.upsert({
-            where: { device_id: deviceId },
-            create: {
-              device_id: deviceId,
-              note,
-              status,
-              created_by: authUser.userId,
-              updated_by: authUser.userId,
-            },
-            update: { note, status, updated_by: authUser.userId },
-          });
+          const { data: saved } = await supabase
+            .from("device_whitelist")
+            .upsert(
+              {
+                device_id: deviceId,
+                note,
+                status,
+                created_by: authUser.userId,
+                updated_by: authUser.userId,
+              },
+              { onConflict: "device_id" },
+            )
+            .select()
+            .single();
           set.status = 201;
           return { entry: saved };
         },
@@ -139,22 +150,35 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         },
       )
       .get("/notifications", async (ctx) => {
-        const entries = await prisma.notification.findMany({
-          orderBy: [{ is_welcome: "desc" }, { publish_at: "desc" }],
-          take: 200,
-          include: { recipients: { select: { user_id: true } } },
-        });
-        const rows = entries as Array<{
+        const { data: entries } = await supabase
+          .from("notifications")
+          .select("id, title, description, is_welcome, importance, publish_at, status, created_date, updated_date, recipient_organization_ids, recipient_roles")
+          .order("is_welcome", { ascending: false })
+          .order("publish_at", { ascending: false })
+          .limit(200);
+        const notifs = entries ?? [];
+        const notifIds = notifs.map((n: { id: string }) => n.id);
+        const { data: recipientRows } = notifIds.length
+          ? await supabase
+            .from("notification_recipients")
+            .select("notification_id, user_id")
+            .in("notification_id", notifIds)
+          : { data: [] };
+        const recipientMap = new Map<string, string[]>();
+        for (const r of recipientRows ?? []) {
+          if (!recipientMap.has(r.notification_id)) recipientMap.set(r.notification_id, []);
+          recipientMap.get(r.notification_id)!.push(r.user_id);
+        }
+        const rows = notifs as Array<{
           id: string;
           title: string;
           description: string;
           is_welcome: boolean;
           importance: string;
-          publish_at: Date;
+          publish_at: string;
           status: string;
-          created_date: Date;
-          updated_date: Date;
-          recipients: Array<{ user_id: string }>;
+          created_date: string;
+          updated_date: string;
           recipient_organization_ids: string[];
           recipient_roles: string[];
         }>;
@@ -169,7 +193,7 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
             status: e.status,
             createdDate: e.created_date,
             updatedDate: e.updated_date,
-            recipientUserIds: (e.recipients ?? []).map((r) => r.user_id),
+            recipientUserIds: recipientMap.get(e.id) ?? [],
             recipientOrganizationIds: e.recipient_organization_ids ?? [],
             recipientRoles: e.recipient_roles ?? [],
           })),
@@ -187,218 +211,131 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
           const description = body.description.trim();
           const importance = body.importance;
           const status = body.status;
-          const publishAt = new Date(body.publishAt);
+          const publishAt = new Date(body.publishAt).toISOString();
           const isWelcome = Boolean(body.isWelcome);
           const rawRecipientIds = body.recipientUserIds ?? [];
           const rawRecipientOrgIds = body.recipientOrganizationIds ?? [];
           const rawRecipientRoles = body.recipientRoles ?? [];
-          if (!Number.isFinite(publishAt.getTime())) {
+          if (!Number.isFinite(new Date(body.publishAt).getTime())) {
             set.status = 400;
             return { ok: false, code: "INVALID_PUBLISH_AT" };
           }
 
-          if (isWelcome) {
-            const saved = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-              const existingWelcome = await tx.notification.findFirst({
-                where: { organization_id: authUser.organizationId, is_welcome: true },
-                select: { id: true },
-              });
-              const row = existingWelcome
-                ? await tx.notification.update({
-                    where: { id: existingWelcome.id },
-                    data: {
-                      title,
-                      description,
-                      importance,
-                      status,
-                      publish_at: publishAt,
-                      is_welcome: true,
-                      recipient_organization_ids: rawRecipientOrgIds,
-                      recipient_roles: rawRecipientRoles,
-                      updated_by: authUser.userId,
-                    },
-                  })
-                : await tx.notification.create({
-                    data: {
-                      organization_id: authUser.organizationId,
-                      title,
-                      description,
-                      importance,
-                      status,
-                      publish_at: publishAt,
-                      is_welcome: true,
-                      recipient_organization_ids: rawRecipientOrgIds,
-                      recipient_roles: rawRecipientRoles,
-                      created_by: authUser.userId,
-                      updated_by: authUser.userId,
-                    },
-                  });
-
-              const validUsers = rawRecipientIds.length
-                ? await tx.user.findMany({
-                    where: { id: { in: rawRecipientIds } },
-                    select: { id: true },
-                  })
-                : [];
-              await tx.notificationRecipient.deleteMany({ where: { notification_id: row.id } });
-              if (validUsers.length) {
-                await tx.notificationRecipient.createMany({
-                  data: validUsers.map((u: { id: string }) => ({
-                    notification_id: row.id,
-                    user_id: u.id,
-                  })),
-                  skipDuplicates: true,
-                });
-              }
-
-              if (status === "ACTIVE") {
-                const active = await tx.notification.findMany({
-                  where: {
-                    status: "ACTIVE",
-                    organization_id: authUser.organizationId,
-                    is_welcome: false,
-                  },
-                  orderBy: [{ publish_at: "desc" }],
-                  select: { id: true },
-                  take: 50,
-                });
-                if (active.length > 10) {
-                  const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
-                  await tx.notification.updateMany({
-                    where: { id: { in: toDeactivate } },
-                    data: { status: "INACTIVE", updated_by: authUser.userId },
-                  });
-                }
-              }
-
-              return row;
-            });
-            set.status = 200;
-            return { entry: saved };
-          }
-
-          if (id) {
-            const updated = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-              const existing = await tx.notification.findFirst({
-                where: { id },
-                select: { id: true },
-              });
-              if (!existing) return null;
-              const saved = await tx.notification.update({
-                where: { id },
-                data: {
+          const saveNotification = async (notifId: string | null) => {
+            let row: { id: string } | null = null;
+            if (notifId) {
+              const { data } = await supabase
+                .from("notifications")
+                .update({
                   title,
                   description,
                   importance,
                   status,
                   publish_at: publishAt,
-                  is_welcome: false,
+                  is_welcome: isWelcome,
                   recipient_organization_ids: rawRecipientOrgIds,
                   recipient_roles: rawRecipientRoles,
                   updated_by: authUser.userId,
-                },
-              });
+                })
+                .eq("id", notifId)
+                .select()
+                .single();
+              row = data;
+            } else {
+              const { data } = await supabase
+                .from("notifications")
+                .insert({
+                  organization_id: authUser.organizationId,
+                  title,
+                  description,
+                  importance,
+                  status,
+                  publish_at: publishAt,
+                  is_welcome: isWelcome,
+                  recipient_organization_ids: rawRecipientOrgIds,
+                  recipient_roles: rawRecipientRoles,
+                  created_by: authUser.userId,
+                  updated_by: authUser.userId,
+                })
+                .select()
+                .single();
+              row = data;
+            }
+            if (!row) return null;
 
-              const validUsers = rawRecipientIds.length
-                ? await tx.user.findMany({
-                    where: { id: { in: rawRecipientIds } },
-                    select: { id: true },
-                  })
-                : [];
-              await tx.notificationRecipient.deleteMany({ where: { notification_id: id } });
-              if (validUsers.length) {
-                await tx.notificationRecipient.createMany({
-                  data: validUsers.map((u: { id: string }) => ({
-                    notification_id: id,
+
+            await supabase
+              .from("notification_recipients")
+              .delete()
+              .eq("notification_id", row.id);
+
+            if (rawRecipientIds.length) {
+              const { data: validUsers } = await supabase
+                .from("users")
+                .select("id")
+                .in("id", rawRecipientIds);
+              if (validUsers && validUsers.length) {
+                await supabase.from("notification_recipients").upsert(
+                  validUsers.map((u: { id: string }) => ({
+                    notification_id: row!.id,
                     user_id: u.id,
                   })),
-                  skipDuplicates: true,
-                });
+                  { onConflict: "notification_id,user_id", ignoreDuplicates: true },
+                );
               }
+            }
 
-              if (status === "ACTIVE") {
-                const active = await tx.notification.findMany({
-                  where: {
-                    status: "ACTIVE",
-                    organization_id: authUser.organizationId,
-                    is_welcome: false,
-                  },
-                  orderBy: [{ publish_at: "desc" }],
-                  select: { id: true },
-                  take: 50,
-                });
-                if (active.length > 10) {
-                  const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
-                  await tx.notification.updateMany({
-                    where: { id: { in: toDeactivate } },
-                    data: { status: "INACTIVE", updated_by: authUser.userId },
-                  });
-                }
+
+            if (status === "ACTIVE") {
+              const { data: active } = await supabase
+                .from("notifications")
+                .select("id")
+                .eq("status", "ACTIVE")
+                .eq("organization_id", authUser.organizationId)
+                .eq("is_welcome", false)
+                .order("publish_at", { ascending: false })
+                .limit(50);
+              if (active && active.length > 10) {
+                const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
+                await supabase
+                  .from("notifications")
+                  .update({ status: "INACTIVE", updated_by: authUser.userId })
+                  .in("id", toDeactivate);
               }
-              return saved;
-            });
-            if (!updated) {
+            }
+            return row;
+          };
+
+          if (isWelcome) {
+            const { data: existingWelcome } = await supabase
+              .from("notifications")
+              .select("id")
+              .eq("organization_id", authUser.organizationId)
+              .eq("is_welcome", true)
+              .limit(1)
+              .maybeSingle();
+            const saved = await saveNotification(existingWelcome?.id ?? null);
+            set.status = 200;
+            return { entry: saved };
+          }
+
+          if (id) {
+            const { data: existing } = await supabase
+              .from("notifications")
+              .select("id")
+              .eq("id", id)
+              .limit(1)
+              .maybeSingle();
+            if (!existing) {
               set.status = 404;
               return { ok: false, code: "NOT_FOUND" };
             }
+            const updated = await saveNotification(id);
             set.status = 200;
             return { entry: updated };
           }
 
-          const created = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-            const saved = await tx.notification.create({
-              data: {
-                organization_id: authUser.organizationId,
-                title,
-                description,
-                importance,
-                status,
-                publish_at: publishAt,
-                is_welcome: false,
-                recipient_organization_ids: rawRecipientOrgIds,
-                recipient_roles: rawRecipientRoles,
-                created_by: authUser.userId,
-                updated_by: authUser.userId,
-              },
-            });
-
-            const validUsers = rawRecipientIds.length
-              ? await tx.user.findMany({
-                  where: { id: { in: rawRecipientIds } },
-                  select: { id: true },
-                })
-              : [];
-            if (validUsers.length) {
-              await tx.notificationRecipient.createMany({
-                data: validUsers.map((u: { id: string }) => ({
-                  notification_id: saved.id,
-                  user_id: u.id,
-                })),
-                skipDuplicates: true,
-              });
-            }
-
-            if (status === "ACTIVE") {
-              const active = await tx.notification.findMany({
-                where: {
-                  status: "ACTIVE",
-                  organization_id: authUser.organizationId,
-                  is_welcome: false,
-                },
-                orderBy: [{ publish_at: "desc" }],
-                select: { id: true },
-                take: 50,
-              });
-              if (active.length > 10) {
-                const toDeactivate = active.slice(10).map((n: { id: string }) => n.id);
-                await tx.notification.updateMany({
-                  where: { id: { in: toDeactivate } },
-                  data: { status: "INACTIVE", updated_by: authUser.userId },
-                });
-              }
-            }
-            return saved;
-          });
+          const created = await saveNotification(null);
           set.status = 201;
           return { entry: created };
         },
@@ -426,42 +363,54 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
       )
       .get("/notification-templates/welcome", async (ctx) => {
         const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-        const now = new Date();
-        const existing = await prisma.notification.findFirst({
-          where: { organization_id: authUser.organizationId, is_welcome: true },
-          select: { id: true },
-        });
-        const entry = existing
-          ? await prisma.notification.update({
-              where: { id: existing.id },
-              data: { updated_by: authUser.userId },
-              select: { status: true, title: true, description: true, updated_date: true },
+        const nowIso = new Date().toISOString();
+        const { data: existing } = await supabase
+          .from("notifications")
+          .select("id")
+          .eq("organization_id", authUser.organizationId)
+          .eq("is_welcome", true)
+          .limit(1)
+          .maybeSingle();
+        let entry: { status: string; title: string; description: string; updated_date: string } | null;
+        if (existing) {
+          const { data } = await supabase
+            .from("notifications")
+            .update({ updated_by: authUser.userId })
+            .eq("id", existing.id)
+            .select("status, title, description, updated_date")
+            .single();
+          entry = data;
+        } else {
+          const { data } = await supabase
+            .from("notifications")
+            .insert({
+              organization_id: authUser.organizationId,
+              title: "Welcome in, {{name}}",
+              description:
+                "Hey {{name}} — welcome to Cuan Yuk. You're officially in. Tap around, explore the dashboard, and start stacking wins today.",
+              importance: "LOW",
+              status: "ACTIVE",
+              publish_at: nowIso,
+              is_welcome: true,
+              recipient_organization_ids: [],
+              recipient_roles: [],
+              created_by: authUser.userId,
+              updated_by: authUser.userId,
             })
-          : await prisma.notification.create({
-              data: {
-                organization_id: authUser.organizationId,
-                title: "Welcome in, {{name}}",
-                description:
-                  "Hey {{name}} — welcome to Cuan Yuk. You’re officially in. Tap around, explore the dashboard, and start stacking wins today.",
-                importance: "LOW",
-                status: "ACTIVE",
-                publish_at: now,
-                is_welcome: true,
-                recipient_organization_ids: [],
-                recipient_roles: [],
-                created_by: authUser.userId,
-                updated_by: authUser.userId,
-              },
-              select: { status: true, title: true, description: true, updated_date: true },
-            });
+            .select("status, title, description, updated_date")
+            .single();
+          entry = data;
+        }
         return {
-          template: {
-            key: "WELCOME",
-            status: entry.status,
-            title: entry.title,
-            description: entry.description,
-            updatedDate: entry.updated_date,
-          },
+          template: entry
+            ? {
+              key: "WELCOME",
+              status: entry.status,
+              title: entry.title,
+              description: entry.description,
+              updatedDate: entry.updated_date,
+            }
+            : null,
         };
       })
       .post(
@@ -469,49 +418,61 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         async (ctx) => {
           const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
           const body = ctx.body;
-          const now = new Date();
-          const existing = await prisma.notification.findFirst({
-            where: { organization_id: authUser.organizationId, is_welcome: true },
-            select: { id: true },
-          });
-          const updated = existing
-            ? await prisma.notification.update({
-                where: { id: existing.id },
-                data: {
-                  title: body.title.trim(),
-                  description: body.description.trim(),
-                  status: body.status,
-                  publish_at: now,
-                  is_welcome: true,
-                  updated_by: authUser.userId,
-                },
-                select: { status: true, title: true, description: true, updated_date: true },
+          const nowIso = new Date().toISOString();
+          const { data: existing } = await supabase
+            .from("notifications")
+            .select("id")
+            .eq("organization_id", authUser.organizationId)
+            .eq("is_welcome", true)
+            .limit(1)
+            .maybeSingle();
+          let entry: { status: string; title: string; description: string; updated_date: string } | null;
+          if (existing) {
+            const { data } = await supabase
+              .from("notifications")
+              .update({
+                title: body.title.trim(),
+                description: body.description.trim(),
+                status: body.status,
+                publish_at: nowIso,
+                is_welcome: true,
+                updated_by: authUser.userId,
               })
-            : await prisma.notification.create({
-                data: {
-                  organization_id: authUser.organizationId,
-                  title: body.title.trim(),
-                  description: body.description.trim(),
-                  importance: "LOW",
-                  status: body.status,
-                  publish_at: now,
-                  is_welcome: true,
-                  recipient_organization_ids: [],
-                  recipient_roles: [],
-                  created_by: authUser.userId,
-                  updated_by: authUser.userId,
-                },
-                select: { status: true, title: true, description: true, updated_date: true },
-              });
+              .eq("id", existing.id)
+              .select("status, title, description, updated_date")
+              .single();
+            entry = data;
+          } else {
+            const { data } = await supabase
+              .from("notifications")
+              .insert({
+                organization_id: authUser.organizationId,
+                title: body.title.trim(),
+                description: body.description.trim(),
+                importance: "LOW",
+                status: body.status,
+                publish_at: nowIso,
+                is_welcome: true,
+                recipient_organization_ids: [],
+                recipient_roles: [],
+                created_by: authUser.userId,
+                updated_by: authUser.userId,
+              })
+              .select("status, title, description, updated_date")
+              .single();
+            entry = data;
+          }
           return {
             ok: true,
-            template: {
-              key: "WELCOME",
-              status: updated.status,
-              title: updated.title,
-              description: updated.description,
-              updatedDate: updated.updated_date,
-            },
+            template: entry
+              ? {
+                key: "WELCOME",
+                status: entry.status,
+                title: entry.title,
+                description: entry.description,
+                updatedDate: entry.updated_date,
+              }
+              : null,
           };
         },
         {
@@ -523,13 +484,13 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         },
       )
       .get("/organizations", async (ctx) => {
-        const orgs = await prisma.organization.findMany({
-          orderBy: [{ display_name: "asc" }],
-          take: 500,
-          select: { id: true, display_name: true, status: true },
-        });
+        const { data: orgs } = await supabase
+          .from("organizations")
+          .select("id, display_name, status")
+          .order("display_name", { ascending: true })
+          .limit(500);
         return {
-          organizations: orgs.map((o: { id: string; display_name: string; status: string }) => ({
+          organizations: (orgs ?? []).map((o: { id: string; display_name: string; status: string }) => ({
             id: o.id,
             displayName: o.display_name,
             status: o.status,
@@ -537,27 +498,19 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
         };
       })
       .get("/users", async (ctx) => {
-        const users = await prisma.user.findMany({
-          orderBy: [{ updated_date: "desc" }],
-          take: 500,
-          select: {
-            id: true,
-            username: true,
-            email: true,
-            role: true,
-            status: true,
-            created_date: true,
-            updated_date: true,
-          },
-        });
-        const rows = users as Array<{
+        const { data: users } = await supabase
+          .from("users")
+          .select("id, username, email, role, status, created_date, updated_date")
+          .order("updated_date", { ascending: false })
+          .limit(500);
+        const rows = (users ?? []) as Array<{
           id: string;
           username: string;
           email: string;
           role: "USER" | "SUPER";
           status: string;
-          created_date: Date;
-          updated_date: Date;
+          created_date: string;
+          updated_date: string;
         }>;
         return {
           users: rows.map((u) => ({
@@ -585,26 +538,31 @@ export const adminRoutes = new Elysia({ prefix: "/api/admin" }).guard(
           const role = body.role;
           const status = body.status;
 
-          const existing = await prisma.user.findFirst({
-            where: { id },
-            select: { id: true, status: true },
-          });
+          const { data: existing } = await supabase
+            .from("users")
+            .select("id, status")
+            .eq("id", id)
+            .limit(1)
+            .maybeSingle();
           if (!existing) {
             set.status = 404;
             return { ok: false, code: "NOT_FOUND" };
           }
 
-          const updated = await prisma.user.update({
-            where: { id },
-            data: { username, email, role, status, updated_by: authUser.userId },
-          });
+          const { data: updated } = await supabase
+            .from("users")
+            .update({ username, email, role, status, updated_by: authUser.userId })
+            .eq("id", id)
+            .select()
+            .single();
 
           if (status === "INACTIVE") {
-            const now = new Date();
-            await prisma.session.updateMany({
-              where: { user_id: id, status: "ACTIVE" },
-              data: { status: "INACTIVE", revoked_at: now, updated_by: authUser.userId },
-            });
+            const nowIso = new Date().toISOString();
+            await supabase
+              .from("sessions")
+              .update({ status: "INACTIVE", revoked_at: nowIso, updated_by: authUser.userId })
+              .eq("user_id", id)
+              .eq("status", "ACTIVE");
           }
 
           set.status = 200;

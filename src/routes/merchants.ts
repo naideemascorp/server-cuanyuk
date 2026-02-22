@@ -1,5 +1,5 @@
 import { config } from "@/config";
-import { prisma } from "@/lib/prisma";
+import { supabase } from "@/lib/supabase";
 import type { AuthUser } from "@/lib/types";
 import { Elysia, t } from "elysia";
 
@@ -34,12 +34,15 @@ const extToMime = (ext: string) => {
 export const merchantRoutes = new Elysia({ prefix: "/merchants" })
   .get("/", async (ctx) => {
     const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
-    const merchants = await prisma.merchant.findMany({
-      where: { organization_id: authUser.organizationId, status: "ACTIVE" },
-      orderBy: [{ category: "asc" }, { sort_order: "asc" }, { name: "asc" }],
-      select: { id: true, name: true, category: true, picture_path: true, picture_mime: true },
-    });
-    const rows = merchants as Array<{
+    const { data: merchants } = await supabase
+      .from("merchants")
+      .select("id, name, category, picture_path, picture_mime")
+      .eq("organization_id", authUser.organizationId)
+      .eq("status", "ACTIVE")
+      .order("category", { ascending: true })
+      .order("sort_order", { ascending: true })
+      .order("name", { ascending: true });
+    const rows = (merchants ?? []) as Array<{
       id: string;
       name: string;
       category: string;
@@ -66,21 +69,18 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
       const set = ctx.set;
       let picture_path: string | null = null;
       let picture_mime: string | null = null;
-      let picture_data: Uint8Array<ArrayBuffer> | null = null;
+      let picture_data: string | null = null;
       if (body.imageBase64 && body.imageBase64.trim() !== "") {
         const bytes = decodeBase64(body.imageBase64.trim());
         if (bytes.length > 3_000_000) throw new Error("IMAGE_TOO_LARGE");
         const ext = sniffExt(bytes);
         picture_mime = extToMime(ext);
-        const ab = bytes.buffer.slice(
-          bytes.byteOffset,
-          bytes.byteOffset + bytes.byteLength,
-        ) as ArrayBuffer;
-        picture_data = new Uint8Array(ab);
+        picture_data = `\\x${Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("")}`;
         picture_path = null;
       }
-      const merchant = await prisma.merchant.create({
-        data: {
+      const { data: merchant } = await supabase
+        .from("merchants")
+        .insert({
           organization_id: authUser.organizationId,
           name: body.name.trim(),
           category: body.category.trim() || "General",
@@ -89,19 +89,22 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
           picture_data,
           created_by: authUser.userId,
           updated_by: authUser.userId,
-        },
-      });
+        })
+        .select()
+        .single();
       set.status = 201;
       return {
-        merchant: {
-          id: merchant.id,
-          name: merchant.name,
-          category: merchant.category,
-          pictureUrl:
-            merchant.picture_mime || merchant.picture_path
-              ? `${config.serverPublicBaseUrl}/assets/merchant/${merchant.id}`
-              : null,
-        },
+        merchant: merchant
+          ? {
+            id: merchant.id,
+            name: merchant.name,
+            category: merchant.category,
+            pictureUrl:
+              merchant.picture_mime || merchant.picture_path
+                ? `${config.serverPublicBaseUrl}/assets/merchant/${merchant.id}`
+                : null,
+          }
+          : null,
       };
     },
     {
@@ -118,10 +121,11 @@ export const merchantRoutes = new Elysia({ prefix: "/merchants" })
       const authUser = (ctx as unknown as { authUser: AuthUser }).authUser;
       const params = ctx.params;
       const set = ctx.set;
-      await prisma.merchant.updateMany({
-        where: { id: params.id, organization_id: authUser.organizationId },
-        data: { status: "DELETED", updated_by: authUser.userId },
-      });
+      await supabase
+        .from("merchants")
+        .update({ status: "DELETED", updated_by: authUser.userId })
+        .eq("id", params.id)
+        .eq("organization_id", authUser.organizationId);
       set.status = 204;
     },
     { params: t.Object({ id: t.String() }) },

@@ -4,10 +4,10 @@ import { config } from "@/config";
 import { ok as apiOk, failBug, isApiResponse } from "@/lib/api-response";
 import { getDeviceIdFromContext } from "@/lib/device";
 import { getClientIpFromContext } from "@/lib/ip";
-import { prisma } from "@/lib/prisma";
 import { startExpirationSweep } from "@/lib/scheduler";
 import { makeShareToken, verifyShareToken } from "@/lib/share";
 import { resolveUploadPath } from "@/lib/storage";
+import { supabase } from "@/lib/supabase";
 import { verifySessionToken } from "@/lib/token";
 import type { AuthUser } from "@/lib/types";
 import { wsRegistry } from "@/lib/ws";
@@ -128,11 +128,15 @@ const app = new Elysia()
     const { sub, org, jti } = payload;
     if (!sub || !org || !jti) return { authUser: null };
 
-    const session = await prisma.session.findFirst({
-      where: { user_id: sub, jwt_id: jti, status: "ACTIVE" },
-      select: { expires_at: true },
-    });
-    if (!session || session.expires_at.getTime() < Date.now()) {
+    const { data: session } = await supabase
+      .from("sessions")
+      .select("expires_at")
+      .eq("user_id", sub)
+      .eq("jwt_id", jti)
+      .eq("status", "ACTIVE")
+      .limit(1)
+      .maybeSingle();
+    if (!session || new Date(session.expires_at).getTime() < Date.now()) {
       return { authUser: null };
     }
 
@@ -149,81 +153,80 @@ const app = new Elysia()
 
       const deviceId = getDeviceIdFromContext(ctx);
       if (deviceId) {
-        const deviceRow = await prisma.deviceWhitelist.findFirst({
-          where: { device_id: deviceId },
-        });
+        const { data: deviceRow } = await supabase
+          .from("device_whitelist")
+          .select("status")
+          .eq("device_id", deviceId)
+          .limit(1)
+          .maybeSingle();
         if (deviceRow?.status === "INACTIVE") {
           ctx.set.status = 404;
           return { ok: false };
         }
       } else {
         const ip = getClientIpFromContext(ctx);
-        const ipRow = await prisma.iPWhitelist.findFirst({ where: { ip } });
+        const { data: ipRow } = await supabase
+          .from("ip_whitelist")
+          .select("status")
+          .eq("ip", ip)
+          .limit(1)
+          .maybeSingle();
         if (ipRow?.status === "INACTIVE") {
           ctx.set.status = 404;
           return { ok: false };
         }
       }
 
-      const org = await prisma.organization.findFirst({
-        where: { id: verified.organizationId, status: "ACTIVE" },
-      });
+      const { data: org } = await supabase
+        .from("organizations")
+        .select("id")
+        .eq("id", verified.organizationId)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (!org) {
         ctx.set.status = 404;
         return { ok: false };
       }
 
-      const hasActiveUser = await prisma.user.findFirst({
-        where: { organization_id: verified.organizationId, status: "ACTIVE" },
-        select: { id: true },
-      });
+      const { data: hasActiveUser } = await supabase
+        .from("users")
+        .select("id")
+        .eq("organization_id", verified.organizationId)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (!hasActiveUser) {
         ctx.set.status = 404;
         return { ok: false };
       }
 
-      const merchants = await prisma.merchant.findMany({
-        where: { organization_id: verified.organizationId, status: "ACTIVE" },
-        orderBy: [{ category: "asc" }, { name: "asc" }],
-        select: { id: true, name: true, category: true, picture_path: true, picture_mime: true },
-      });
+      const { data: merchants } = await supabase
+        .from("merchants")
+        .select("id, name, category, picture_path, picture_mime")
+        .eq("organization_id", verified.organizationId)
+        .eq("status", "ACTIVE")
+        .order("category", { ascending: true })
+        .order("name", { ascending: true });
 
-      const items = await prisma.paymentItem.findMany({
-        where: { organization_id: verified.organizationId, status: "ACTIVE" },
-        orderBy: [{ created_date: "desc" }],
-        select: {
-          id: true,
-          kind: true,
-          status: true,
-          total_amount: true,
-          payment_url: true,
-          qris_path: true,
-          qris_mime: true,
-          expires_at: true,
-          created_date: true,
-          merchant: { select: { id: true, name: true, category: true } },
-        },
-      });
+      const { data: items } = await supabase
+        .from("payment_items")
+        .select("id, kind, status, total_amount, payment_url, qris_path, qris_mime, expires_at, created_date, merchant_id")
+        .eq("organization_id", verified.organizationId)
+        .eq("status", "ACTIVE")
+        .order("created_date", { ascending: false });
 
-      const merchantRows = merchants as Array<{
-        id: string;
-        name: string;
-        category: string;
-        picture_path: string | null;
-        picture_mime: string | null;
+      const merchantRows = (merchants ?? []) as Array<{
+        id: string; name: string; category: string;
+        picture_path: string | null; picture_mime: string | null;
       }>;
-      const itemRows = items as Array<{
-        id: string;
-        kind: "LINK" | "QRIS";
-        status: string;
-        total_amount: number;
-        payment_url: string | null;
-        qris_path: string | null;
-        qris_mime: string | null;
-        expires_at: Date | null;
-        created_date: Date;
-        merchant: { id: string; name: string; category: string };
+      const itemRows = (items ?? []) as Array<{
+        id: string; kind: "LINK" | "QRIS"; status: string;
+        total_amount: number; payment_url: string | null;
+        qris_path: string | null; qris_mime: string | null;
+        expires_at: string | null; created_date: string; merchant_id: string;
       }>;
+      const merchantMap = new Map(merchantRows.map((m) => [m.id, m]));
 
       return {
         ok: true,
@@ -236,18 +239,21 @@ const app = new Elysia()
               ? `${config.serverPublicBaseUrl}/assets/merchant/${m.id}`
               : null,
         })),
-        items: itemRows.map((i) => ({
-          id: i.id,
-          kind: i.kind,
-          status: i.status,
-          totalAmount: i.total_amount,
-          paymentUrl: i.payment_url,
-          qrisUrl:
-            i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
-          expiresAt: i.expires_at,
-          createdDate: i.created_date,
-          merchant: { id: i.merchant.id, name: i.merchant.name, category: i.merchant.category },
-        })),
+        items: itemRows.map((i) => {
+          const merchant = merchantMap.get(i.merchant_id) ?? { id: i.merchant_id, name: "", category: "" };
+          return {
+            id: i.id,
+            kind: i.kind,
+            status: i.status,
+            totalAmount: i.total_amount,
+            paymentUrl: i.payment_url,
+            qrisUrl:
+              i.qris_mime || i.qris_path ? `${config.serverPublicBaseUrl}/assets/qris/${i.id}` : null,
+            expiresAt: i.expires_at,
+            createdDate: i.created_date,
+            merchant: { id: merchant.id, name: merchant.name, category: merchant.category },
+          };
+        }),
       };
     },
     { params: t.Object({ token: t.String({ minLength: 10 }) }) },
@@ -257,10 +263,14 @@ const app = new Elysia()
       set.status = 401;
       return { ok: false, code: "UNAUTHORIZED" };
     }
-    const user = await prisma.user.findFirst({
-      where: { id: authUser.userId, organization_id: authUser.organizationId, status: "ACTIVE" },
-      select: { id: true, username: true, email: true, organization_id: true, role: true },
-    });
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, username, email, organization_id, role")
+      .eq("id", authUser.userId)
+      .eq("organization_id", authUser.organizationId)
+      .eq("status", "ACTIVE")
+      .limit(1)
+      .maybeSingle();
     if (!user) {
       set.status = 401;
       return { ok: false, code: "UNAUTHORIZED" };
@@ -308,10 +318,13 @@ const app = new Elysia()
         if (ext === "webp") return "image/webp";
         return "image/png";
       };
-      const row = await prisma.merchant.findFirst({
-        where: { id: params.id, status: "ACTIVE" },
-        select: { picture_data: true, picture_mime: true, picture_path: true },
-      });
+      const { data: row } = await supabase
+        .from("merchants")
+        .select("picture_data, picture_mime, picture_path")
+        .eq("id", params.id)
+        .eq("status", "ACTIVE")
+        .limit(1)
+        .maybeSingle();
       if (!row) {
         set.status = 404;
         return "not found";
@@ -325,16 +338,16 @@ const app = new Elysia()
           const ab = await file.arrayBuffer();
           const next = new Uint8Array(ab);
           const nextMime = mimeFromName(row.picture_path);
-          await prisma.merchant.update({
-            where: { id: params.id },
-            data: {
-              picture_data: next,
+          await supabase
+            .from("merchants")
+            .update({
+              picture_data: `\\x${Array.from(next).map((b) => b.toString(16).padStart(2, "0")).join("")}`,
               picture_mime: nextMime,
               picture_path: null,
               updated_by: "system",
-            },
-          });
-          void unlink(path).catch(() => {});
+            })
+            .eq("id", params.id);
+          void unlink(path).catch(() => { });
           bytes = next;
           mime = nextMime;
         }
@@ -363,10 +376,14 @@ const app = new Elysia()
         if (ext === "webp") return "image/webp";
         return "image/png";
       };
-      const row = await prisma.paymentItem.findFirst({
-        where: { id: params.id, status: "ACTIVE", kind: "QRIS" },
-        select: { qris_data: true, qris_mime: true, qris_path: true },
-      });
+      const { data: row } = await supabase
+        .from("payment_items")
+        .select("qris_data, qris_mime, qris_path")
+        .eq("id", params.id)
+        .eq("status", "ACTIVE")
+        .eq("kind", "QRIS")
+        .limit(1)
+        .maybeSingle();
       if (!row) {
         set.status = 404;
         return "not found";
@@ -380,11 +397,16 @@ const app = new Elysia()
           const ab = await file.arrayBuffer();
           const next = new Uint8Array(ab);
           const nextMime = mimeFromName(row.qris_path);
-          await prisma.paymentItem.update({
-            where: { id: params.id },
-            data: { qris_data: next, qris_mime: nextMime, qris_path: null, updated_by: "system" },
-          });
-          void unlink(path).catch(() => {});
+          await supabase
+            .from("payment_items")
+            .update({
+              qris_data: `\\x${Array.from(next).map((b) => b.toString(16).padStart(2, "0")).join("")}`,
+              qris_mime: nextMime,
+              qris_path: null,
+              updated_by: "system",
+            })
+            .eq("id", params.id);
+          void unlink(path).catch(() => { });
           bytes = next;
           mime = nextMime;
         }
@@ -421,7 +443,7 @@ const app = new Elysia()
         if (parsed?.type === "sync") {
           wsRegistry.broadcast({ type: "items:changed" });
         }
-      } catch {}
+      } catch { }
     },
   })
   .listen({
@@ -443,19 +465,20 @@ void (async () => {
     }
 
     for (const ip of ips) {
-      await prisma.iPWhitelist.upsert({
-        where: { ip },
-        update: { status: "ACTIVE", updated_by: "system" },
-        create: {
-          ip,
-          note: "local-dev",
-          status: "ACTIVE",
-          created_by: "system",
-          updated_by: "system",
-        },
-      });
+      await supabase
+        .from("ip_whitelist")
+        .upsert(
+          {
+            ip,
+            note: "local-dev",
+            status: "ACTIVE",
+            created_by: "system",
+            updated_by: "system",
+          },
+          { onConflict: "ip" },
+        );
     }
-  } catch {}
+  } catch { }
 })();
 
 console.log(`Server on http://0.0.0.0:${app.server?.port}`);
