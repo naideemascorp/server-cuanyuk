@@ -76,5 +76,6 @@ export const config = {
     pass: required("SMTP_PASS"),
     from: required("MAIL_FROM"),
   },
+  signupWhitelistEnabled: (process.env.SIGNUP_WHITELIST_ENABLED ?? "true").toLowerCase() === "true",
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN,
 };

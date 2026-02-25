@@ -83,6 +83,11 @@ export type EmailMessage = {
   html?: string;
 };
 
+const extractEmail = (addr: string): string => {
+  const match = /<([^>]+)>/.exec(addr);
+  return match ? match[1] : addr;
+};
+
 const buildMime = (msg: EmailMessage) => {
   const date = new Date().toUTCString();
   const headers = [
@@ -186,7 +191,7 @@ export const sendSmtpMail = async (smtp: SmtpConfig, msg: EmailMessage): Promise
     await writeLine(tlsSocket, `AUTH PLAIN ${toBase64(auth)}`);
     expect2xx3xx(await readResponse(tlsSocket), "SMTP_AUTH");
 
-    await writeLine(tlsSocket, `MAIL FROM:<${msg.from}>`);
+    await writeLine(tlsSocket, `MAIL FROM:<${extractEmail(msg.from)}>`);
     expect2xx3xx(await readResponse(tlsSocket), "SMTP_MAIL_FROM");
 
     await writeLine(tlsSocket, `RCPT TO:<${msg.to}>`);
@@ -212,7 +217,7 @@ export const sendSmtpMail = async (smtp: SmtpConfig, msg: EmailMessage): Promise
   await writeLine(socket, `AUTH PLAIN ${toBase64(auth)}`);
   expect2xx3xx(await readResponse(socket), "SMTP_AUTH");
 
-  await writeLine(socket, `MAIL FROM:<${msg.from}>`);
+  await writeLine(socket, `MAIL FROM:<${extractEmail(msg.from)}>`);
   expect2xx3xx(await readResponse(socket), "SMTP_MAIL_FROM");
 
   await writeLine(socket, `RCPT TO:<${msg.to}>`);

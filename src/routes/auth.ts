@@ -194,6 +194,7 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
     }
 
     const deviceId = getDeviceIdFromContext(ctx);
+    if (!config.signupWhitelistEnabled) return { allowed: true, deviceId };
     try {
       const { data: hasAnyUser } = await withTimeout(
         () => supabase.from("users").select("id").limit(1).maybeSingle(),
@@ -231,34 +232,38 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
 
       let whitelisted: { organization_id: string | null } | null = null;
       let bootstrap = false;
-      try {
-        const { data: hasAnyUser } = await withTimeout(
-          () => supabase.from("users").select("id").limit(1).maybeSingle(),
-          1200,
-        );
-        bootstrap = !hasAnyUser;
-        if (!bootstrap) {
-          const { data } = await withTimeout(
-            () => supabase
-              .from("device_whitelist")
-              .select("organization_id")
-              .eq("device_id", deviceId)
-              .eq("status", "ACTIVE")
-              .limit(1)
-              .maybeSingle(),
+      if (!config.signupWhitelistEnabled) {
+        whitelisted = { organization_id: null };
+      } else {
+        try {
+          const { data: hasAnyUser } = await withTimeout(
+            () => supabase.from("users").select("id").limit(1).maybeSingle(),
             1200,
           );
-          whitelisted = data;
-        } else {
-          whitelisted = { organization_id: null };
+          bootstrap = !hasAnyUser;
+          if (!bootstrap) {
+            const { data } = await withTimeout(
+              () => supabase
+                .from("device_whitelist")
+                .select("organization_id")
+                .eq("device_id", deviceId)
+                .eq("status", "ACTIVE")
+                .limit(1)
+                .maybeSingle(),
+              1200,
+            );
+            whitelisted = data;
+          } else {
+            whitelisted = { organization_id: null };
+          }
+        } catch {
+          set.status = 503;
+          return { ok: false, code: "DB_NOT_READY" };
         }
-      } catch {
-        set.status = 503;
-        return { ok: false, code: "DB_NOT_READY" };
-      }
-      if (!whitelisted) {
-        set.status = 403;
-        return { ok: false, code: "SIGNUP_DEVICE_NOT_ALLOWED" };
+        if (!whitelisted) {
+          set.status = 403;
+          return { ok: false, code: "SIGNUP_DEVICE_NOT_ALLOWED" };
+        }
       }
 
       let organization: { id: string } | null = null;
@@ -341,10 +346,16 @@ export const authRoutes = new Elysia({ prefix: "/auth" })
       });
 
       const verifyUrl = `${config.appPublicBaseUrl}/verify-email?token=${token}`;
-      await sendEmailVerification(user.email, verifyUrl);
+      let emailSent = true;
+      try {
+        await sendEmailVerification(user.email, verifyUrl);
+      } catch (emailErr) {
+        emailSent = false;
+        console.error("[signup] email delivery failed:", emailErr);
+      }
 
       set.status = 201;
-      return { ok: true };
+      return { ok: true, emailSent };
     },
     {
       body: t.Object({
