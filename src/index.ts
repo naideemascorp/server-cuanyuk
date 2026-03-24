@@ -445,40 +445,45 @@ const app = new Elysia()
         }
       } catch { }
     },
-  })
-  .listen({
+  });
+
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen({
     port: Number(process.env.PORT ?? 3001),
     hostname: "0.0.0.0",
   });
 
-startExpirationSweep();
-void startTelegramBot();
-void (async () => {
-  try {
-    const ips = new Set<string>(["127.0.0.1", "::1"]);
-    const net = networkInterfaces();
-    for (const entries of Object.values(net)) {
-      for (const entry of entries ?? []) {
-        if (!entry || entry.internal) continue;
-        if (entry.address) ips.add(entry.address);
+  startExpirationSweep();
+  void startTelegramBot();
+  void (async () => {
+    try {
+      const ips = new Set<string>(["127.0.0.1", "::1"]);
+      const net = networkInterfaces();
+      for (const entries of Object.values(net)) {
+        for (const entry of entries ?? []) {
+          if (!entry || entry.internal) continue;
+          if (entry.address) ips.add(entry.address);
+        }
       }
-    }
 
-    for (const ip of ips) {
-      await supabase
-        .from("ip_whitelist")
-        .upsert(
-          {
-            ip,
-            note: "local-dev",
-            status: "ACTIVE",
-            created_by: "system",
-            updated_by: "system",
-          },
-          { onConflict: "ip" },
-        );
-    }
-  } catch { }
-})();
+      for (const ip of ips) {
+        await supabase
+          .from("ip_whitelist")
+          .upsert(
+            {
+              ip,
+              note: "local-dev",
+              status: "ACTIVE",
+              created_by: "system",
+              updated_by: "system",
+            },
+            { onConflict: "ip" },
+          );
+      }
+    } catch { }
+  })();
 
-console.log(`Server on http://0.0.0.0:${app.server?.port}`);
+  console.log(`Server on http://0.0.0.0:${app.server?.port}`);
+}
