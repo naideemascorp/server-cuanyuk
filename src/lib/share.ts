@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { config } from "@/config";
+import { config } from "../config";
 
 const b64url = (buf: Buffer) =>
   buf.toString("base64").replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");

@@ -1,7 +1,7 @@
-import { config } from "@/config";
-import { supabase } from "@/lib/supabase";
-import type { AuthUser } from "@/lib/types";
-import { wsRegistry } from "@/lib/ws";
+import { config } from "../config";
+import { supabase } from "../lib/supabase";
+import type { AuthUser } from "../lib/types";
+import { wsRegistry } from "../lib/ws";
 import { Elysia, t } from "elysia";
 
 const parseExpiry = (value: string | null, defaultsToMinutes?: number) => {

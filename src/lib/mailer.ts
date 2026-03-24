@@ -1,5 +1,5 @@
-import { config } from "@/config";
-import { sendSmtpMail } from "@/lib/smtp";
+import { config } from "../config";
+import { sendSmtpMail } from "./smtp";
 
 const baseEmailHtml = (opts: {
   title: string;

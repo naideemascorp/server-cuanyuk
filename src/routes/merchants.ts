@@ -1,6 +1,6 @@
-import { config } from "@/config";
-import { supabase } from "@/lib/supabase";
-import type { AuthUser } from "@/lib/types";
+import { config } from "../config";
+import { supabase } from "../lib/supabase";
+import type { AuthUser } from "../lib/types";
 import { Elysia, t } from "elysia";
 
 const decodeBase64 = (b64: string) => {

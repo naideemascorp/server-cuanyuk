@@ -1,5 +1,5 @@
-import { hashPassword } from "@/lib/auth";
-import { supabase } from "@/lib/supabase";
+import { hashPassword } from "./lib/auth";
+import { supabase } from "./lib/supabase";
 
 const run = async () => {
   const ips = ["127.0.0.1", "::1"];

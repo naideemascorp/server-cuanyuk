@@ -1,5 +1,5 @@
-import { supabase } from "@/lib/supabase";
-import { wsRegistry } from "@/lib/ws";
+import { supabase } from "./supabase";
+import { wsRegistry } from "./ws";
 
 export const startExpirationSweep = () => {
   let pauseUntil = 0;

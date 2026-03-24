@@ -1,5 +1,5 @@
-import { supabase } from "@/lib/supabase";
-import type { AuthUser } from "@/lib/types";
+import { supabase } from "../lib/supabase";
+import type { AuthUser } from "../lib/types";
 import { Elysia, t } from "elysia";
 
 type NotificationImportance = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";

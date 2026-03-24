@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabase";
+import { supabase } from "./supabase";
 
 export const hashPassword = async (plain: string) => Bun.password.hash(plain);
 

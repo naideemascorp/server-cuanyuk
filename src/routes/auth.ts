@@ -1,10 +1,10 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { config } from "@/config";
-import { hashPassword, verifyPassword } from "@/lib/auth";
-import { getDeviceIdFromContext } from "@/lib/device";
-import { sendEmailVerification, sendPasswordResetEmail } from "@/lib/mailer";
-import { supabase } from "@/lib/supabase";
-import { signSessionToken } from "@/lib/token";
+import { config } from "../config";
+import { hashPassword, verifyPassword } from "../lib/auth";
+import { getDeviceIdFromContext } from "../lib/device";
+import { sendEmailVerification, sendPasswordResetEmail } from "../lib/mailer";
+import { supabase } from "../lib/supabase";
+import { signSessionToken } from "../lib/token";
 import { Elysia, t } from "elysia";
 
 const oneDayMs = 24 * 60 * 60 * 1000;
